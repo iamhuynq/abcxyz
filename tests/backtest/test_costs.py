@@ -201,6 +201,39 @@ def test_evaluate_is_research_only_and_not_logged(built, tmp_path):
     assert "Valuation policy" in text and "Order size" in text
 
 
+
+def test_evaluate_stores_every_control_and_the_exceedance_p(built, tmp_path):
+    rule = UniverseRule(min_adv_value=0, min_session_index=0, min_stocks_per_date=2, signal_decile=3)
+    with ResultsStore(tmp_path / "results.duckdb", built / "r.duckdb") as store:
+        run_id = evaluate(store, "t", strat(initial_equity=1e9, max_positions=2), "research", NOW, rule,
+                          n_control=3, capitals=(1e9,))
+        outcomes = store.con.execute("""SELECT cost_model, series, count(*), min(seed), max(seed)
+                                        FROM control_outcomes WHERE run_id = ? GROUP BY ALL""", [run_id]).fetchall()
+        exc = dict(store.con.execute("""SELECT cost_model || '/' || series, value FROM economic_results
+                                        WHERE run_id = ? AND metric = 'exceedance_p'""", [run_id]).fetchall())
+        share = dict(store.con.execute("""SELECT cost_model || '/' || series, value FROM economic_results
+                                          WHERE run_id = ? AND metric = 'share_beaten'""", [run_id]).fetchall())
+        median = store.con.execute("""SELECT value FROM economic_results WHERE run_id = ? AND cost_model = 'v1_k1'
+                                      AND series = 'random' AND metric = 'median_cagr'""", [run_id]).fetchone()[0]
+        cagrs = [r[0] for r in store.con.execute("""SELECT cagr FROM control_outcomes WHERE run_id = ?
+                    AND cost_model = 'v1_k1' AND series = 'random' ORDER BY seed""", [run_id]).fetchall()]
+    assert sorted(outcomes) == sorted((c, s, 3, 0, 2) for c in ("flat", "v1_k1")
+                                      for s in ("random", "industry_matched", "beta_matched"))
+    assert set(exc) == {f"{c}/{s}" for c in ("flat", "v1_k1") for s in ("random", "industry_matched", "beta_matched")}
+    assert all(v in (0.25, 0.5, 0.75, 1.0) for v in exc.values())                   # (1 + k) / (1 + 3)
+    for k, v in exc.items():                                   # no ties here: p = (1 + controls not beaten) / 4
+        assert v == pytest.approx((1 + 3 * (1 - share[k])) / 4)
+    assert median == pytest.approx(np.median(cagrs))             # the summary comes from the stored outcomes
+
+
+def test_exceedance_p_counts_ties_against_the_strategy():
+    from quant_research.controls import exceedance_p, summary
+    assert exceedance_p(10.0, [9.0, 10.0, 11.0]) == pytest.approx(3 / 4)
+    assert exceedance_p(10.0, [1.0] * 199) == pytest.approx(1 / 200)                 # never 0
+    s = summary(10.0, [9.0, 10.0, 11.0], [0.0, 0.1, 0.2])
+    assert s["share_beaten"] == pytest.approx(1 / 3) and s["n_controls"] == 3
+
+
 def test_participation_ignores_orders_without_a_valid_adv():
     from quant_research.backtest.metrics import participation
     out = participation(np.array([10.0, 20.0, 30.0, 40.0]), np.array([100.0, np.nan, 0.0, 400.0]))

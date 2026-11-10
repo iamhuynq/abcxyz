@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 import scipy.stats as sps
 
+from quant_research import controls
 from quant_research.backtest import runner
 from quant_research.backtest.benchmarks import key_matrices, liquidity_weighted_curve
 from quant_research.backtest.costs import CostModel
@@ -32,7 +33,7 @@ COSTS: dict[str, CostModel | None] = {"flat": None, "v1_k1": CostModel(k=1.0),
 DECISION = (1e9, "v1_k1")
 SELL_LAG = 3                    # T+2 assumption: first sale at the open of b + 3 (see portfolio/engine.py)
 SELL_LAG_OPTIMISTIC = 2         # sensitivity, decision setting only
-N_CONTROL = 20
+N_CONTROL = controls.N_CONTROL        # 20 before the review of 2026-11-10; recorded runs store theirs
 TEST_LAG = 10
 BREAK_EVEN_MAX = 0.05
 
@@ -112,6 +113,7 @@ def evaluate(store: ResultsStore, name: str, now: datetime, period: str = "resea
         raise PortfolioRefused(f"Run {earlier} already logged config {name}; invalidate it with a reason first.")
     cfg = configs[name]
     store.con.execute(SCHEMA)
+    store.con.execute(controls.SCHEMA)
     full = runner._market(store, period, rule)
     scores = score_matrix(store, full, cfg.signal)
     has = np.flatnonzero(np.isfinite(scores).any(axis=1))
@@ -146,7 +148,11 @@ def evaluate(store: ResultsStore, name: str, now: datetime, period: str = "resea
             m |= {f"excess_cagr_vs_{b}": m["cagr"] - v for b, v in bench_cagr.items()}
             rows += [(capital, cname, "strategy", k, v) for k, v in m.items()]
             if cname == "v1_k1":
-                rows += _control(simulate, capital, model, res, days, rho, market.open.shape[1], n_control)
+                ctl_rows, outcomes = _control(simulate, capital, model, res, days, rho, market.open.shape[1],
+                                              n_control)
+                rows += ctl_rows
+                store.con.executemany("INSERT INTO control_outcomes VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                      [(run_id, *o) for o in outcomes])
             if (capital, cname) == DECISION:
                 decision_curve, ew_curve = res.equity, bench["equal_weight"]
     written = simulate(DECISION[0], COSTS[DECISION[1]], writedown_after=WRITEDOWN_SESSIONS)
@@ -217,21 +223,22 @@ def persistent_random_scores(seed: int, k: int, n_days: int, rho_spearman: float
 
 
 def _control(simulate, capital: float, model: CostModel | None, res: PortfolioResult, days: np.ndarray, rho: float,
-             k: int, n: int) -> list:
-    """Same construction on random scores with the signal's own rank persistence between rebalances."""
+             k: int, n: int) -> tuple[list, list]:
+    """Same construction on random scores with the signal's own rank persistence between rebalances. Returns
+    the summary rows and every control's outcome (capital, cost model, series, seed, final equity, CAGR)."""
     pos = {int(d): r for r, d in enumerate(days)}
     runs = []
     for seed in range(n):
         z = persistent_random_scores(seed, k, len(days), rho)
         runs.append(simulate(capital, model, lambda i, z=z: z[pos[i]]))
-    cagr = np.array([curve_metrics(r.equity)["cagr"] for r in runs], dtype=float)
+    finals = [r.equity[-1] for r in runs]
+    cagr = [curve_metrics(r.equity)["cagr"] for r in runs]
     turnover = np.array([_metrics(r, capital)["turnover_per_year"] for r in runs], dtype=float)
-    return [(capital, "v1_k1", "random_construction", "share_beaten",
-             float(np.mean([r.equity[-1] < res.equity[-1] for r in runs]))),
-            (capital, "v1_k1", "random_construction", "median_cagr", float(np.nanmedian(cagr))),
-            (capital, "v1_k1", "random_construction", "p05_cagr", float(np.nanpercentile(cagr, 5))),
-            (capital, "v1_k1", "random_construction", "p95_cagr", float(np.nanpercentile(cagr, 95))),
-            (capital, "v1_k1", "random_construction", "median_turnover_per_year", float(np.nanmedian(turnover)))]
+    series = "random_construction"
+    rows = [(capital, "v1_k1", series, k, v) for k, v in controls.summary(res.equity[-1], finals, cagr).items()]
+    rows.append((capital, "v1_k1", series, "median_turnover_per_year", float(np.nanmedian(turnover))))
+    outcomes = [o[1:] for o in controls.outcome_rows("", capital, "v1_k1", series, finals, cagr)]
+    return rows, outcomes
 
 
 def _break_even(simulate, capital: float, model: CostModel, target: float, iterations: int = 14,

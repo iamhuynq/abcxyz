@@ -62,12 +62,15 @@ def render(store: ResultsStore, run_id: str) -> str:
               "Note: the liquidity-weighted benchmark (weights = ADV20, rebalanced daily) is a poor capitalization "
               "proxy: it overweights stocks right after volume spikes. Compare with VNINDEX for a cap-weighted view.",
               "",
-              "| Capital (bn VND) | Costs | Control | Share of runs beaten | Control median CAGR [p5, p95] |",
-              "|---|---|---|---|---|"]
+              "Exceedance p = (1 + controls ending at or above the strategy) / (1 + controls); runs before the "
+              "review of 2026-11-10 used 20 controls and have no exceedance p.", "",
+              "| Capital (bn VND) | Costs | Control | Share of runs beaten | Exceedance p | Control median CAGR [p5, p95] |",
+              "|---|---|---|---|---|---|"]
     for c in capitals:
         for cost in CONTROL_COSTS:
             for ctl in ("random", "industry_matched", "beta_matched"):
                 lines.append(f"| {c / 1e9:g} | {cost} | {ctl} | {_num(v(c, cost, ctl, 'share_beaten'), '.0%')} | "
+                             f"{_num(v(c, cost, ctl, 'exceedance_p'), '.3f')} | "
                              f"{_pct(v(c, cost, ctl, 'median_cagr'))} [{_pct(v(c, cost, ctl, 'p05_cagr'))}, "
                              f"{_pct(v(c, cost, ctl, 'p95_cagr'))}] |")
     be_flat = v(BREAK_EVEN_CAPITAL, "flat", "strategy", "break_even_extra_cost_per_side")

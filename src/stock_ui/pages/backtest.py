@@ -2,6 +2,7 @@
 
 import json
 
+import pandas as pd
 import streamlit as st
 
 from stock_ui import context, exposure_panel, research_data
@@ -34,6 +35,12 @@ with tab_paper:
                       delta_color="off")
             c3.metric("Equal weight", f"{last['equal_weight'] / base - 1:+.2%}")
             c4.metric("VNINDEX", f"{last['vnindex'] / base - 1:+.2%}")
+            wide = last.get("wide_exceedance_p")
+            if wide is not None and pd.notna(wide):
+                st.caption(f"Diagnostic, not the pre-registered criterion: against 200 random controls the strategy's "
+                           f"exceedance p is {wide:.3f} (median {last['wide_random_median'] / base - 1:+.2%}, "
+                           f"p95 {last['wide_random_p95'] / base - 1:+.2%}). The pre-registered test uses the 20 "
+                           "controls above.")
             st.plotly_chart(paper_figure(d), width="stretch")
             st.markdown(f"**Open positions ({len(p['positions'])})**")
             st.dataframe(p["positions"], hide_index=True, width="stretch", column_config={"pnl": PCT})

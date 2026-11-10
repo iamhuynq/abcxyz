@@ -170,13 +170,16 @@ def test_evaluate_grid_rules(tmp_path_factory):
         logged = store.con.execute("SELECT run_id, label FROM hypothesis_log").fetchall()
         extra = {r[0] for r in store.con.execute("""SELECT DISTINCT series || '/' || metric FROM portfolio_results
                                                    WHERE run_id = ?""", [runs["T1"]]).fetchall()}
+        outcomes = store.con.execute("""SELECT count(*), count(DISTINCT seed), any_value(series) FROM control_outcomes
+                                        WHERE run_id = ?""", [runs["T1"]]).fetchone()
         text = render(store, runs)
         cash = store.con.execute("""SELECT value FROM portfolio_results WHERE run_id = ? AND metric = 'avg_cash_share'
                                     AND cost_model = 'flat'""", [runs["T2"]]).fetchone()[0]
     assert sorted(logged) == sorted((r, "portfolio_excess_vs_equal_weight") for r in runs.values())
     assert "| T1 |" in text and "Worth a pre-registration" in text
     assert {"writedown_60/cagr", "writedown_60/break_even_extra_cost_per_side", "strategy/participation_median",
-            "sell_lag_2/cagr"} <= extra
+            "sell_lag_2/cagr", "random_construction/exceedance_p"} <= extra
+    assert outcomes == (2, 2, "random_construction")                  # every control stored (n_control=2)
     assert cash > 0                                               # Bear filter holds cash part of the time
 
 

@@ -8,7 +8,7 @@ from quant_research.portfolio.evaluate import CAPITALS, COSTS, DECISION
 from quant_research.provenance import from_runs
 from quant_research.results import ResultsStore
 
-MIN_SHARE_BEATEN = 0.95        # at least 19 of 20 matched random runs
+MIN_SHARE_BEATEN = 0.95        # share of matched random runs beaten (19 of 20, or 190 of 200)
 MIN_BREAK_EVEN = 0.002         # extra cost per side on top of v1 k = 1
 
 
@@ -76,7 +76,8 @@ def render(store: ResultsStore, run_ids: dict[str, str]) -> str:
                      f"{_num(get((c, 'v1_k1', 'random_construction', 'median_turnover_per_year')), '.1f')} | "
                      f"{_num(get((c, 'v1_k1', 'strategy', 'rank_persistence')), '.2f')} | "
                      f"{_num(get((c, 'v1_k1', 'strategy', 'avg_cash_share')), '.0%')} | "
-                     f"{_num(get((c, 'v1_k1', 'random_construction', 'share_beaten')), '.0%')} | "
+                     f"{_num(get((c, 'v1_k1', 'random_construction', 'share_beaten')), '.0%')}"
+                     f" (p {_num(get((c, 'v1_k1', 'random_construction', 'exceedance_p')), '.3f')}) | "
                      f"{_num(get((c, 'v1_k1', 'strategy', 'break_even_extra_cost_per_side')), '.3%')} | "
                      f"{_num(get((c, 'v1_k1', 'test', 'excess_vs_equal_weight_p')), '.3g')} / {_num(q.get(run_id), '.3g')} | "
                      f"{'**yes**' if ok else 'no'} |")

@@ -28,7 +28,8 @@ FORWARD_START = date(2026, 10, 3)
 COMPLETENESS = 0.95
 AVOID_PATTERN = "drop3_volume2_sellers"
 FROZEN_STRATEGY = Strategy(hold_sessions=10, max_positions=20, renew=True, initial_equity=1e9)  # version 72c851c7
-N_RANDOM = 20
+N_RANDOM = 20            # pre-registered (preregistration-backtest-2026-10-04.md: seeds 0-19); never change
+N_RANDOM_WIDE = 200      # diagnostic only (review of 2026-11-10): not the pre-registered criterion
 # Validation decisions live in the Research Registry (quant_research/registry.py). Reports show them
 # verbatim; they never recompute a pass/fail from statistics (that once mislabelled C1 as passed).
 
@@ -48,6 +49,11 @@ CREATE TABLE IF NOT EXISTS paper_daily (
 -- Added 2026-10-09 (execution audit): the same strategy marked at last traded closes (information only).
 ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS equity_traded_mark DOUBLE;
 -- The run_date of the paper record that is current (NULL: no complete forward session yet).
+-- Added 2026-11-10 (review): 200 random controls (seeds 0-199), diagnostic only; the pre-registered
+-- criterion stays on the 20 controls above. exceedance p = (1 + controls >= strategy) / (1 + controls).
+ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS wide_random_median DOUBLE;
+ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS wide_random_p95 DOUBLE;
+ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS wide_exceedance_p DOUBLE;
 CREATE TABLE IF NOT EXISTS paper_state (id INTEGER PRIMARY KEY, paper_date DATE, updated_at TIMESTAMPTZ);
 CREATE TABLE IF NOT EXISTS paper_positions (
     run_date DATE NOT NULL, symbol VARCHAR NOT NULL, entry_date DATE, shares DOUBLE, entry_price DOUBLE,
@@ -134,7 +140,8 @@ def _scan_catalog_events(con: duckdb.DuckDBPyConnection, d: date, is_forward: bo
 
 
 def run_paper(store: ResultsStore, run_date: date, strategy: Strategy = FROZEN_STRATEGY,
-              rule: UniverseRule = UniverseRule(), n_random: int = N_RANDOM) -> int:
+              rule: UniverseRule = UniverseRule(), n_random: int = N_RANDOM,
+              n_wide: int = N_RANDOM_WIDE) -> int:
     """Re-simulate the frozen strategy over the forward window up to run_date; returns the number of sessions."""
     m = load_market(store.con, FORWARD_START, run_date, rule)
     if len(m.dates) < 2:                             # nothing to simulate: leave no rows behind for this run_date
@@ -142,18 +149,28 @@ def run_paper(store: ResultsStore, run_date: date, strategy: Strategy = FROZEN_S
         store.con.execute("DELETE FROM paper_positions WHERE run_date = ?", [run_date])
         return len(m.dates)
     res = run(m, strategy, signal_selector, mark="legacy")        # pre-registered measurement
-    rnd = np.array([run(m, strategy, random_selector(seed), mark="legacy").equity for seed in range(n_random)])
+    wide = np.array([run(m, strategy, random_selector(seed), mark="legacy").equity
+                     for seed in range(max(n_random, n_wide))])
+    rnd = wide[:n_random]                            # pre-registered: seeds 0-19, the same runs as before
+    wide = wide[:n_wide] if n_wide else None
     traded = run(m, strategy, signal_selector, mark="traded").equity      # information: last traded closes
     ew = equal_weight_curve(m.close, m.universe, strategy.initial_equity)
     vn = strategy.initial_equity * m.index_close / m.index_close[0]
     p05, med, p95 = np.percentile(rnd, [5, 50, 95], axis=0)
+    if wide is not None and len(wide):
+        w_med, w_p95 = np.percentile(wide, [50, 95], axis=0)
+        w_exc = (1 + (wide >= res.equity).sum(axis=0)) / (1 + len(wide))
+    else:
+        w_med = w_p95 = w_exc = np.full(len(m.dates), np.nan)
     con = store.con
     con.execute("DELETE FROM paper_daily WHERE run_date = ?", [run_date])
     con.execute("DELETE FROM paper_positions WHERE run_date = ?", [run_date])
     con.executemany("""INSERT INTO paper_daily (run_date, date, equity, random_p05, random_median, random_p95,
-                       equal_weight, vnindex, n_positions, equity_traded_mark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
+                       equal_weight, vnindex, n_positions, equity_traded_mark, wide_random_median, wide_random_p95,
+                       wide_exceedance_p) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
         (run_date, d.item(), float(res.equity[i]), float(p05[i]), float(med[i]), float(p95[i]), float(ew[i]),
-         float(vn[i]), int(res.n_positions[i]), float(traded[i])) for i, d in enumerate(m.dates)])
+         float(vn[i]), int(res.n_positions[i]), float(traded[i]), _num(w_med[i]), _num(w_p95[i]), _num(w_exc[i]))
+        for i, d in enumerate(m.dates)])
     open_rows = [(run_date, t.symbol, m.dates[t.entry_index].item(), t.shares, t.entry_price, t.exit_price)
                  for t in res.trades if t.exit_reason == "open_at_end"]
     if open_rows:                                    # no open position (all cash) is valid: nothing to insert
@@ -161,8 +178,13 @@ def run_paper(store: ResultsStore, run_date: date, strategy: Strategy = FROZEN_S
     return len(m.dates)
 
 
+def _num(v) -> float | None:
+    return None if v is None or not np.isfinite(v) else float(v)
+
+
 def run_daily(store: ResultsStore, now: datetime, rescan: date | None = None,
               library: dict[str, Pattern] = LIBRARY, n_random: int = N_RANDOM,
+              n_wide: int = N_RANDOM_WIDE,
               rule: UniverseRule = UniverseRule()) -> DailyResult:
     store.con.execute(SCHEMA)
     final = final_session(now)
@@ -182,7 +204,7 @@ def run_daily(store: ResultsStore, now: datetime, rescan: date | None = None,
         SELECT max(s.scan_date) FROM daily_scans s, gap
         WHERE s.status = 'scanned' AND s.scan_date >= ? AND s.scan_date <= ? AND (gap.d IS NULL OR s.scan_date < gap.d)""",
         [FORWARD_START, latest, FORWARD_START, latest]).fetchone()[0] if latest else None
-    sessions = run_paper(store, paper_date, rule=rule, n_random=n_random) if paper_date else 0
+    sessions = run_paper(store, paper_date, rule=rule, n_random=n_random, n_wide=n_wide) if paper_date else 0
     # The current paper record: readers use this date, never max(run_date), so an older re-simulation that is no
     # longer valid (or none at all) is never shown as current. Earlier run_date rows stay as history.
     # Only a record that was actually simulated (2+ forward sessions) becomes current; otherwise there is none.

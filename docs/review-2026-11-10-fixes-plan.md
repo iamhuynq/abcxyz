@@ -1,7 +1,7 @@
 # Plan: fixes from the repository review of 2026-11-10
 
 <!-- type: refactor -->
-<!-- status: proposed 2026-11-10 -->
+<!-- status: built 2026-11-10 (approved 2026-11-10) -->
 
 Source: `vn-stock-quant-main-review-2026-11-10.md` (review of `main` at `ba9d6e5`), and the reviewer's
 follow-up after our rebuttal. Every finding was checked against the code and the real data first. The
@@ -141,3 +141,29 @@ Branch `review-2026-11-10-fixes`, one commit per fix; the user pushes and merges
 - Before the audit and the fix-5 runs, back up `results.duckdb` to `data/results.before-review-2026-11-10.duckdb`.
   The audit adds runs and logs no hypotheses; restoring the backup undoes it.
 - Raw store: the new names are additive; old files are untouched.
+
+## Result (2026-11-10)
+
+Branch `review-2026-11-10-fixes`: one commit per fix, plus one follow-up commit for the audit report. The
+full suite passes (405 tests), including the GNU date/stat shim run of `tests/test_daily_script.py`. Every
+new test fails on the previous code (mutation-checked); two tests were vacuous at first and were
+strengthened:
+- the paper-control seed test: the synthetic forward controls never trade;
+- the material-flip rule test.
+
+| Fix | Commit | Notes |
+|-----|--------|-------|
+| 3. `daily.sh` busy exit | `f4c0e50` | Exit 9; `RunRecord.status()` shows `refused` |
+| 4. Raw store | `cee1219` | **Changed from the plan:** no random suffix. Every write of one run shares `run_at`, so a random suffix would make replay order arbitrary. The first file keeps the old name; later same-second files get `_001`, `_002`, ... and are created with `os.link` (fails if the name exists). Replay order stays chronological |
+| 1. Universe and masks | `c608e46` | `point_in_time_sql`, `mask_sql`, `sample_sql`; per-horizon mask columns in `stock_targets` (research.duckdb rebuilt). Default SQL selects exactly the recorded rows (test); default runs store the same parameters as before |
+| 2. Mask audit | `f030de5`, `762bb86` | **Changed from the plan:** descriptive and not logged, like `quant audit pit`, rather than a `mask_audit` run in `results.duckdb`. Nothing in `results.duckdb` changes, so no backup was needed. Results: `mask-sensitivity-results-2026-11-10.md` |
+| 5. Random controls | `bd5ad89` | 200 controls and `control_outcomes` for new econ / portfolio runs, with the exceedance p in their reports. **The backtest runner keeps 20**: it is the pre-registered harness. Paper portfolio: 200-control diagnostic columns and a caption on the Backtest page. On real data it adds 0.1 s; exceedance p 0.020 at 2026-11-09, after 26 sessions |
+
+Audit outcome:
+- No recorded research-period conclusion depends on the masks: 0 material changes across 259 tests and
+  five alternative configurations.
+- Rank agreement is at least 0.996.
+- All 14 interaction candidates survive every configuration.
+- The execution mask is concentrated in momentum and order-flow patterns (up to 5.2% of their hits), but
+  this does not change any decision.
+- No registry move and no invalidation.

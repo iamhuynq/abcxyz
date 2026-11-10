@@ -10,6 +10,7 @@ Last updated: 2026-11-10. Update this file at the end of every task.
 - Paper portfolio (frozen strategy, forward data) since 2026-10-03. At 2026-11-09, after 26 sessions:
   - strategy +1.86%, above the p95 of the random controls (-0.08%; median -2.23%);
   - equal weight -1.84%, VNINDEX -2.22%;
+  - against 200 random controls (diagnostic, not the pre-registered test) the exceedance p is 0.020;
   - before realistic costs, and too short a sample to conclude anything.
 - Avoid signal hits on forward data: KOS (2026-10-27, 2026-10-29), HIO (2026-10-29), POM (2026-10-30).
 
@@ -122,6 +123,18 @@ Registry). Summary:
 
   Fifth commit: a missing `paper_state` row falls back to the latest run; an explicit NULL is kept.
 
+- Review of 2026-11-10 (plan `review-2026-11-10-fixes-plan.md`, branch `review-2026-11-10-fixes`, not yet
+  pushed):
+  - the research universe is split into a point-in-time universe and named outcome masks; recorded
+    definitions are unchanged;
+  - `quant audit masks`: no recorded conclusion depends on the masks
+    (`mask-sensitivity-results-2026-11-10.md`);
+  - `daily.sh` exits 9 when busy, shown as refused in the UI;
+  - raw files are never replaced;
+  - 200 stored random controls with an exceedance p for new econ and portfolio runs; the paper portfolio
+    keeps its pre-registered 20 and adds a 200-control diagnostic.
+  - Backlog: Retry-After as an HTTP date; a BY column next to BH; an `adj_ratio` overlap audit; a backup
+    and restore runbook; a vendor-schema canary.
 - Next from `project-review-vn-stock-quant-1.md` (agreed order 2026-10-08):
   1. Research Registry: done.
   2. Factor Engine: done (f1, 9 factors; no Value / Quality without fundamentals).

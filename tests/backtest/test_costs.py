@@ -234,6 +234,28 @@ def test_exceedance_p_counts_ties_against_the_strategy():
     assert s["share_beaten"] == pytest.approx(1 / 3) and s["n_controls"] == 3
 
 
+
+def test_control_summary_ignores_invalid_controls_consistently_and_handles_none():
+    import warnings
+
+    from quant_research.controls import summary
+    nan = float("nan")
+    s = summary(2.0, [1.0, nan, 3.0], [0.1, nan, 0.3])
+    assert s["n_controls"] == 2 and s["n_invalid"] == 1
+    assert s["share_beaten"] == pytest.approx(1 / 2)                   # the NaN control is neither beaten ...
+    assert s["exceedance_p"] == pytest.approx((1 + 1) / (1 + 2))       # ... nor beating
+    assert s["median_cagr"] == pytest.approx(0.2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                                  # no "mean of empty slice"
+        empty = summary(2.0, [], [])
+        all_bad = summary(2.0, [nan, nan], [nan, nan])
+        no_strategy = summary(nan, [1.0, 3.0], [0.1, 0.3])
+    for s in (empty, all_bad):
+        assert all(s[k] is None for k in ("share_beaten", "exceedance_p", "median_cagr", "p05_cagr", "p95_cagr"))
+    assert all_bad["n_invalid"] == 2 and empty["n_controls"] == 0
+    assert no_strategy["share_beaten"] is None and no_strategy["exceedance_p"] is None
+
+
 def test_participation_ignores_orders_without_a_valid_adv():
     from quant_research.backtest.metrics import participation
     out = participation(np.array([10.0, 20.0, 30.0, 40.0]), np.array([100.0, np.nan, 0.0, 400.0]))

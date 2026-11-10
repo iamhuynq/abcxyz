@@ -6,8 +6,10 @@ Each configuration runs in its own scratch results database, so the audit logs n
 store: the multiple-testing families and their q-values do not change. q-values shown by the audit are
 computed within each configuration's own scratch family, which has the same tests in every configuration.
 
-Declared rule (before running): a test is mask-sensitive when, against the combined configuration (the
-recorded definition), its effect changes sign or its q < 0.05 status flips. Validated, failed and forward
+Declared rule (before running): a test is statistically sensitive when, against the combined configuration
+(the recorded definition), its effect changes sign or its q < 0.05 status flips; it is material when it is
+significant under combined and changes sign. Decision sensitivity re-applies a declared decision rule; only
+the interaction candidate rule is mechanical at the research stage. Validated, failed and forward
 hypotheses are not re-decided; their robustness is reported only.
 """
 

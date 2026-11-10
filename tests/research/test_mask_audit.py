@@ -62,6 +62,6 @@ def test_audit_runs_end_to_end_without_touching_real_results(research, monkeypat
     prov = ex.pop("prov").iloc[0].to_dict()
     monkeypatch.setattr("quant_research.mask_audit_report.OTHERS", ["baseline"])
     text = render(results, ex, prov, NOW)
-    assert "## 3. Mask-sensitive tests per configuration" in text
+    assert "## 3. Decision sensitivity" in text and "## 4. Statistical sensitivity per configuration" in text
     assert "Interaction candidates" in text and "| combined |" in text
     assert set(summary(results)["analysis"]) >= {"patterns"}

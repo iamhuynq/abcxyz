@@ -32,7 +32,7 @@ def _md(df: pd.DataFrame, specs: dict[str, str]) -> list[str]:
 
 
 def summary(results: dict) -> pd.DataFrame:
-    """Per table and configuration: tests compared and tests the declared rule marks mask-sensitive."""
+    """Per table and configuration: tests compared, statistically sensitive tests and (in brackets) material ones."""
     rows = []
     for table, keys, _ in SECTIONS:
         cmp = ma.compare(results, table, keys)
@@ -85,11 +85,15 @@ def render(results: dict, extras: dict[str, pd.DataFrame], prov: dict, now: date
              "Configurations: `baseline` (point-in-time universe, no outcome mask), `quality` (data-error jumps "
              "in the target window), `execution` (next open at the ceiling), `period` (target crosses a period "
              "boundary), `combined` (all three: the recorded definition, the reference), `combined_horizon` "
-             "(all three over each target's own window).", "",
-             "Declared rule: a test is mask-sensitive in a configuration when its effect changes sign against "
+             "(all three over each target's own window). Every configuration is compared with `combined`; "
+             "`combined_horizon` has the same three masks, so its difference from `combined` is due to the "
+             "window alone.", "",
+             "Two levels. **Statistical sensitivity** (sections 3 to 8): a test is statistically sensitive in "
+             "a configuration when its effect changes sign against "
              f"`combined`, or its q (p where no q exists) crosses {ma.Q_MAX}. q-values are BH within each "
              "configuration's own scratch family (the same tests in every configuration), so they are smaller "
-             "than the recorded ones, whose family is the whole hypothesis log.", "",
+             "than the recorded ones, whose family is the whole hypothesis log. **Decision sensitivity** "
+             "(section 3): whether a declared decision rule gives a different outcome.", "",
              "## 1. Sample per configuration", ""]
     sample = pd.concat([r["sample"].assign(config=n) for n, r in results.items()], ignore_index=True)
     sample = sample[["config", "target", "rows", "mean", "p05", "p50", "p95"]]
@@ -100,28 +104,35 @@ def render(results: dict, extras: dict[str, pd.DataFrame], prov: dict, now: date
     lines += ["", "## 2. Concentration: share of each pattern's point-in-time hits removed by each mask", "",
               "The first row is all point-in-time rows. A pattern far above it is where a mask matters.", ""]
     lines += _md(extras["concentration"], {"hits": ",", "quality": ".2%", "execution": ".2%", "period": ".2%"})
-    lines += ["", "## 3. Mask-sensitive tests per configuration", ""]
-    lines += ["Each cell: tests the declared rule marks mask-sensitive (in brackets: material ones, i.e. significant "
-              "under `combined` and changing sign).", ""]
-    lines += _md(summary(results), {})
     cands = ma.candidates(results)
     ref_c = cands[ma.REFERENCE]
-    lines += ["", f"Interaction candidates (declared rule, scratch-family q): {len(ref_c)} under `combined`.", "",
+    lines += ["", "## 3. Decision sensitivity", "",
+              "Only the interaction scan has a mechanical research-stage decision rule (the candidate rule of "
+              "`regime-interaction-plan.md`). The other analyses have none to re-apply here:", "",
+              "- patterns: research-stage candidates were chosen at a reviewed checkpoint; their registry decisions "
+              "come from validation and are not re-decided;",
+              "- decile scan and event study: descriptive, no pass/fail;",
+              "- cross-stock tests: decisions come from their pre-registrations and validation, not re-decided.", "",
+              f"Interaction candidates (declared rule, scratch-family q): {len(ref_c)} under `combined`.", "",
               "| config | candidates | added | dropped |", "|---|---|---|---|"]
     for name, c in cands.items():
         lines.append(f"| {name} | {len(c)} | {', '.join(sorted(c - ref_c)) or '-'} | "
                      f"{', '.join(sorted(ref_c - c)) or '-'} |")
+    lines += ["", "## 4. Statistical sensitivity per configuration", "",
+              "Each cell: statistically sensitive tests (in brackets: material ones, i.e. significant under "
+              "`combined` and changing sign).", ""]
+    lines += _md(summary(results), {})
     lines += ["", "Rank agreement of the test statistics with `combined` (Spearman):", ""]
     lines += _md(ranks(results), {n: ".3f" for n in OTHERS})
-    for i, (table, keys, title) in enumerate(SECTIONS, start=4):
+    for i, (table, keys, title) in enumerate(SECTIONS, start=5):
         hit = sensitive_rows(results, table, keys)
         lines += ["", f"## {i}. {title}", ""]
         if hit.empty:
-            lines.append("No mask-sensitive test.")
+            lines.append("No statistically sensitive test.")
         else:
             lines += _md(hit, specs)
     lines += ["", "> Validated, failed and forward hypotheses are not re-decided from this audit: validation and "
-              "holdout cannot be reused. A research-stage conclusion that is mask-sensitive is noted in the "
+              "holdout cannot be reused. A research-stage conclusion that is decision-sensitive is noted in the "
               "results document; a registry change needs `quant registry move` with a reason."]
     return "\n".join(lines) + "\n"
 

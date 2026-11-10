@@ -123,8 +123,8 @@ Registry). Summary:
 
   Fifth commit: a missing `paper_state` row falls back to the latest run; an explicit NULL is kept.
 
-- Review of 2026-11-10 (plan `review-2026-11-10-fixes-plan.md`, branch `review-2026-11-10-fixes`, not yet
-  pushed):
+- Review of 2026-11-10 (plan `review-2026-11-10-fixes-plan.md`, branch `review-2026-11-10-fixes`, merged as
+  PR #4, `5865675`; the branch review leaned to approval, and its three points are addressed):
   - the research universe is split into a point-in-time universe and named outcome masks; recorded
     definitions are unchanged;
   - `quant audit masks`: no recorded conclusion depends on the masks

@@ -59,7 +59,7 @@ def _outcomes(store: ResultsStore, params: ResearchParams, period: str, horizon:
         SELECT dm.date, gm.group_code, avg(f.{y}) AS y
         FROM dm JOIN cx.group_members_monthly gm ON gm.month_end = dm.month_end AND gm.level = 'l2'
         JOIN (SELECT symbol, date, {y} FROM rs.feature_target
-              WHERE {params.universe_sql()} AND period = ? AND {y} IS NOT NULL) f
+              WHERE {params.sample_sql(y)} AND period = ? AND {y} IS NOT NULL) f
           ON f.symbol = gm.symbol AND f.date = dm.date
         GROUP BY 1, 2 HAVING count(*) >= ? ORDER BY 1""", binds).fetchall()
     out: dict = {}

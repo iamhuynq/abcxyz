@@ -82,7 +82,7 @@ def run_event_study(store: ResultsStore, now: datetime, params: ResearchParams =
         SELECT e.event_type, f.symbol, f.date, f.market_regime, f.exchange_now, {cols},
                f.fwd_max_return_5d, f.fwd_max_drawdown_5d
         FROM rs.stock_events e JOIN rs.feature_target f USING (symbol, date)
-        WHERE {params.universe_sql()} AND f.period = ?""", [period]).df()
+        WHERE {params.sample_sql()} AND f.period = ?""", [period]).df()
     df["date"] = pd.to_datetime(df["date"])
     universe = {}
     for label, (col, _h, with_lift) in HORIZONS.items():

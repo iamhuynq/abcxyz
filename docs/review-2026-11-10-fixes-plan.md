@@ -167,3 +167,22 @@ Audit outcome:
 - The execution mask is concentrated in momentum and order-flow patterns (up to 5.2% of their hits), but
   this does not change any decision.
 - No registry move and no invalidation.
+
+### Branch review (2026-11-10)
+
+The external review of the branch leaned towards approval and raised three points:
+
+1. **Decision vs statistical sensitivity.** Accepted. The report now separates them.
+   - Decision sensitivity re-applies declared decision rules. Only the interaction candidate rule is
+     mechanical at the research stage, and no candidate changes.
+   - The rule in this plan ("pass/fail flips or the effect changes sign") is reported as statistical
+     sensitivity.
+2. **`combined_horizon` confounds masks and window.** Not quite. Every configuration is compared with
+   `combined`, which has the same three masks, so the difference is due to the window alone. This is now
+   stated in the report. No extra configurations were added.
+3. **Controls with NaN or no controls.** Accepted. This was a real inconsistency: a NaN control counted as
+   not beaten in `share_beaten` but as beaten in `exceedance_p`. Both now use the controls with a finite
+   final equity, the others are counted in `n_invalid`, and every statistic is `None` when no control is
+   left. No recorded run had a NaN control.
+
+The audit was re-run on the committed code: same numbers, new wording.

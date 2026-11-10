@@ -1,7 +1,7 @@
 # Outcome-mask sensitivity: results (2026-11-10)
 
-Plan: `review-2026-11-10-fixes-plan.md`, fix 2. Report: `data/reports/research/audit-masks-20261110T165740.md`
-(`uv run quant audit masks`; commit `762bb86`, feature build `20261110T163531`). Research period only;
+Plan: `review-2026-11-10-fixes-plan.md`, fix 2. Report: `data/reports/research/audit-masks-20261110T172440.md`
+(`uv run quant audit masks`; commit `7521083`, feature build `20261110T163531`). Research period only;
 nothing logged, no registry change.
 
 ## Question
@@ -20,7 +20,8 @@ Do the recorded research-period conclusions depend on them?
   - `baseline`: no mask;
   - one configuration per mask;
   - `combined`: the recorded definition, used as the reference;
-  - `combined_horizon`: all masks over each target's own window.
+  - `combined_horizon`: all masks over each target's own window. It has the same masks as `combined`, so its
+    difference from the reference is due to the window alone.
 - Each configuration re-runs:
   - the 15 library patterns;
   - the decile scan (31 features);
@@ -28,8 +29,13 @@ Do the recorded research-period conclusions depend on them?
   - the event study (12 event types);
   - the cross-stock tests.
 - Each configuration runs in a scratch results database. q-values are BH within that scratch family.
-- Declared rule: a test is mask-sensitive when its effect changes sign, or its q (or p) crosses 0.05.
-  It is **material** when it is significant under `combined` and its sign changes.
+- Two levels (separated after the branch review):
+  - **Decision sensitivity**: a declared decision rule gives a different outcome. Only the interaction
+    candidate rule is mechanical at the research stage. Pattern candidates were chosen at a reviewed
+    checkpoint, the scan and the event study are descriptive, and pattern and cross decisions come from
+    validation, which is not re-decided.
+  - **Statistical sensitivity**: a test's effect changes sign, or its q (or p) crosses 0.05. It is
+    **material** when it is significant under `combined` and its sign changes.
 - Check: `combined` reproduces the recorded pattern lifts to within 0.00004. The small gap comes from new
   dividend adjustments since the original runs.
 
@@ -54,9 +60,12 @@ The 10-session mean excess moves from +0.090% (baseline) to +0.093% (combined).
 - The validated avoid signal `drop3_volume2_sellers` loses 0.37% of its hits to the execution mask and none
   to the other masks.
 
-**Conclusions.** No material change in any analysis or configuration.
+**Decision sensitivity.** None. All 14 interaction candidates under `combined` stay candidates in every
+configuration; none is dropped (details below).
 
-| Analysis | Tests | Mask-sensitive (any configuration) | Material | Rank agreement (min Spearman) |
+**Statistical sensitivity.** No material change in any analysis or configuration.
+
+| Analysis | Tests | Statistically sensitive (any configuration) | Material | Rank agreement (min Spearman) |
 |---|---|---|---|---|
 | Patterns | 54 | 2 | 0 | 0.999 |
 | Decile scan | 93 | 5 | 0 | 0.999 |

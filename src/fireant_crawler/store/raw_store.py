@@ -1,18 +1,22 @@
-"""Immutable raw response store: data/raw/{job}/{key}/{fetch_date}/{chunk}__{HHMMSS}.json.gz
+"""Immutable raw response store: data/raw/{job}/{key}/{fetch_date}/{chunk}__{HHMMSS}[_NNN].json.gz
 
-The run time in the file name keeps same-day re-runs from overwriting earlier responses.
+The run time in the file name keeps same-day re-runs apart. A file is never replaced: it is created with
+os.link, which fails when the name exists, and a second write in the same second gets the next suffix
+(_001, _002, ...), so the names still sort in write order.
 """
 
 import gzip
 import json
 import os
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fireant_crawler.client.fireant_client import ApiResponse
 
+MAX_SAME_SECOND = 1000
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_.=-]{1,120}")
 
 
@@ -34,7 +38,7 @@ class RawStore:
             / fetched_at.date().isoformat()
         )
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / f"{_check_name('chunk', chunk)}__{fetched_at:%H%M%S}.json.gz"
+        base = f"{_check_name('chunk', chunk)}__{fetched_at:%H%M%S}"
 
         envelope = {
             "fetched_at": fetched_at.isoformat(),
@@ -42,11 +46,20 @@ class RawStore:
             "status": response.status,
             "data": response.data,
         }
-        tmp = target.with_suffix(".tmp")
+        tmp = directory / f".{uuid.uuid4().hex}.tmp"
         with gzip.open(tmp, "wt", encoding="utf-8") as fh:
             json.dump(envelope, fh, ensure_ascii=False)
-        os.replace(tmp, target)
-        return target
+        try:
+            for n in range(MAX_SAME_SECOND):
+                target = directory / (f"{base}.json.gz" if n == 0 else f"{base}_{n:03d}.json.gz")
+                try:
+                    os.link(tmp, target)                   # exclusive: never replaces an existing file
+                    return target
+                except FileExistsError:
+                    continue
+            raise FileExistsError(f"{MAX_SAME_SECOND} raw files named {base} already exist")
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def iter_files(self, job: str) -> list[tuple[str, Path]]:
         """(key, path) for every raw file of a job, oldest fetch first."""

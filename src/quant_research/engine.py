@@ -63,7 +63,7 @@ def run_pattern(store: ResultsStore, pattern: Pattern, period: str, params: Rese
                       [pattern.name, pattern.version, _definition_text(pattern), pattern.base, pattern.hypothesis,
                        pattern.doc_ref, now])
     store.start_run(run_id, "pattern", period, params, now, (pattern.name, pattern.version))
-    source = pattern.source_sql(params.universe_sql(), params.min_stocks_per_date, table=table)
+    source = pattern.source_sql(params.sample_sql(), params.min_stocks_per_date, table=table)
     ev = _events(store, source, [period], params)
 
     segments = {"all": np.ones(len(ev["date"]), dtype=bool)}
@@ -114,8 +114,8 @@ def _lift_vs_universe(store: ResultsStore, run_id: str, ev: dict, h: int, period
 def _compare_with_base(store: ResultsStore, run_id: str, pattern: Pattern, base: Pattern, ev: dict, period: str,
                        params: ResearchParams, now: datetime, table: str = "rs.feature_target") -> None:
     """Refined events vs base events that do NOT meet the refinement, date by date (doc 5.2)."""
-    base_src = base.source_sql(params.universe_sql(), params.min_stocks_per_date, table=table)
-    refined_src = pattern.source_sql(params.universe_sql(), params.min_stocks_per_date, table=table)
+    base_src = base.source_sql(params.sample_sql(), params.min_stocks_per_date, table=table)
+    refined_src = pattern.source_sql(params.sample_sql(), params.min_stocks_per_date, table=table)
     # base events that do not meet the refinement; each source binds the period once
     rest = _events(store, f"SELECT b.* FROM ({base_src}) b ANTI JOIN ({refined_src}) r USING (symbol, date)",
                    [period, period], params)
@@ -146,7 +146,7 @@ def run_scan(store: ResultsStore, period: str, params: ResearchParams, now: date
     store.start_run(run_id, kind, period, params, now)
     con = store.con
     con.execute(f"""CREATE OR REPLACE TEMP TABLE scan_universe AS
-        SELECT * FROM {table} WHERE {params.universe_sql()} AND ({row_filter}) AND period = ?""", [period])
+        SELECT * FROM {table} WHERE {params.sample_sql()} AND ({row_filter}) AND period = ?""", [period])
     segments = {"all": "TRUE"} | {f"regime={r}": f"market_regime = '{r}'" for r in REGIMES} \
         | {f"exchange={e}": f"exchange_now = '{e}'" for e in EXCHANGES}
 

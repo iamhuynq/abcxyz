@@ -64,6 +64,13 @@ def test_exit_code_meaning(data_dir, monkeypatch):
     assert rec.exit_code == 10 and "offline" in rec.meaning()
 
 
+def test_busy_exit_code_is_reported_as_refused_not_failed(data_dir, monkeypatch):
+    """daily.sh exits 9 when another run holds the lock: nothing ran, so the UI shows refused."""
+    monkeypatch.setenv("STUB_RC", "9")
+    rec = wait_for(data_dir, tasks.start(data_dir, "update"), {"ok", "failed", "refused"})
+    assert rec.exit_code == 9 and rec.status() == "refused" and "busy" in rec.meaning()
+
+
 def test_refuses_while_a_live_pipeline_holds_the_lock(data_dir):
     lock = locks.lock_path(data_dir)
     lock.mkdir(parents=True)

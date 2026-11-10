@@ -16,6 +16,7 @@ from quant_research.backtest.data import Market, UniverseRule
 from quant_research.backtest.engine import Strategy, random_selector, run, signal_selector
 from quant_research.backtest.metrics import (WRITEDOWN_SESSIONS, curve_metrics, equal_weight_curve, participation,
                                              strategy_metrics)
+from quant_research import controls
 from quant_research.results import ResearchParams, ResultsStore
 
 CAPITALS = (1e9, 10e9, 100e9)
@@ -24,7 +25,7 @@ COSTS: dict[str, CostModel | None] = {"flat": None, "v1_k0.5": CostModel(k=0.5),
                                       "v1_k1_tick": CostModel(k=1.0, spread="tick")}   # spread lower bound
 CONTROL_COSTS = ("flat", "v1_k1")
 FLAT_AS_MODEL = CostModel(k=0.0, spread="none")      # flat costs, so extra_flat can be added on top
-N_CONTROL = 20
+N_CONTROL = controls.N_CONTROL        # 20 before the review of 2026-11-10; recorded runs store theirs
 BREAK_EVEN_CAPITAL = 1e9
 BREAK_EVEN_MAX = 0.05          # per side
 
@@ -51,6 +52,7 @@ def evaluate(store: ResultsStore, label: str, strategy: Strategy, period: str, n
         raise EconRefused(f"Economic evaluation runs on the research period only, not {period!r}: validation and "
                           "holdout are used; forward needs a pre-registration.")
     store.con.execute(SCHEMA)
+    store.con.execute(controls.SCHEMA)
     full = runner._market(store, period, rule)
     market = runner._slice(full, runner._active_window(full))
     keys = key_matrices(store.con, market)
@@ -82,7 +84,9 @@ def evaluate(store: ResultsStore, label: str, strategy: Strategy, period: str, n
             m |= {f"excess_cagr_vs_{b}": m["cagr"] - c for b, c in bench_cagr.items()}
             rows += [(run_id, capital, cname, "strategy", k, v) for k, v in m.items()]
             if cname in CONTROL_COSTS:
-                rows += _controls(run_id, market, s, model, keys, res, capital, cname, n_control)
+                ctl_rows, outcomes = _controls(run_id, market, s, model, keys, res, capital, cname, n_control)
+                rows += ctl_rows
+                store.con.executemany("INSERT INTO control_outcomes VALUES (?, ?, ?, ?, ?, ?, ?)", outcomes)
     for cname in ("flat", "v1_k1"):                 # valuation policy: write-down of stuck positions
         wd = run(market, replace(strategy, initial_equity=BREAK_EVEN_CAPITAL), signal_selector, COSTS[cname],
                  writedown_after=WRITEDOWN_SESSIONS)
@@ -100,19 +104,19 @@ def evaluate(store: ResultsStore, label: str, strategy: Strategy, period: str, n
 
 
 def _controls(run_id: str, market: Market, s: Strategy, model: CostModel | None, keys: dict, res, capital: float,
-              cname: str, n: int) -> list:
-    out = []
+              cname: str, n: int) -> tuple[list, list]:
+    """Summary rows (share beaten, exceedance p, percentiles) and every control's outcome."""
+    out, outcomes = [], []
     final = res.equity[-1]
     for name, make in (("random", lambda seed: random_selector(seed)),
                        ("industry_matched", lambda seed: matched_random_selector(seed, keys["industry"])),
                        ("beta_matched", lambda seed: matched_random_selector(seed, keys["beta"]))):
         runs = [run(market, s, make(seed), model) for seed in range(n)]
-        cagr = np.array([curve_metrics(r.equity)["cagr"] for r in runs], dtype=float)
-        out += [(run_id, capital, cname, name, "share_beaten", float(np.mean([r.equity[-1] < final for r in runs]))),
-                (run_id, capital, cname, name, "median_cagr", float(np.nanmedian(cagr))),
-                (run_id, capital, cname, name, "p05_cagr", float(np.nanpercentile(cagr, 5))),
-                (run_id, capital, cname, name, "p95_cagr", float(np.nanpercentile(cagr, 95)))]
-    return out
+        finals = [r.equity[-1] for r in runs]
+        cagr = [curve_metrics(r.equity)["cagr"] for r in runs]
+        out += [(run_id, capital, cname, name, k, v) for k, v in controls.summary(final, finals, cagr).items()]
+        outcomes += controls.outcome_rows(run_id, capital, cname, name, finals, cagr)
+    return out, outcomes
 
 
 def break_even(market: Market, s: Strategy, model: CostModel, iterations: int = 14) -> float:

@@ -123,6 +123,22 @@ def test_raw_store_writes_envelope_without_token(tmp_path):
     assert TOKEN not in gzip.decompress(path.read_bytes()).decode()
 
 
+def test_raw_store_never_overwrites_within_the_same_second(tmp_path):
+    """Two fetches in the same second keep both payloads; names sort in write order; no temp file is left."""
+    store, at = RawStore(tmp_path), datetime(2026, 10, 3, 9, 30, 15, tzinfo=UTC)
+    paths = []
+    for value in (1, 2, 3):
+        with make_client(lambda _r, v=value: httpx.Response(200, json=[{"a": v}])) as client:
+            paths.append(store.write("quotes", "VOS", "2026", client.get("/symbols/VOS/historical-quotes"), at))
+    assert [p.name for p in paths] == ["2026__093015.json.gz", "2026__093015_001.json.gz", "2026__093015_002.json.gz"]
+    assert [store.read(p)["data"][0]["a"] for p in paths] == [1, 2, 3]
+    later = at.replace(second=16)
+    with make_client(lambda _r: httpx.Response(200, json=[{"a": 4}])) as client:
+        paths.append(store.write("quotes", "VOS", "2026", client.get("/symbols/VOS/historical-quotes"), later))
+    assert [p for _, p in store.iter_files("quotes")] == paths            # chronological replay order
+    assert not list((tmp_path / "raw").rglob("*.tmp"))
+
+
 def test_raw_store_rejects_unsafe_names(tmp_path):
     with make_client(lambda _r: httpx.Response(200, json=[])) as client:
         res = client.get("/symbols/VOS")

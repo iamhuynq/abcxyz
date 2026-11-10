@@ -248,7 +248,7 @@ Resumable via `crawl_state`.
   `update` fetches a 20-day overlap window; if any stored `adj_ratio` differs it re-fetches the full
   history; stale delisted symbols (no trades for 60 days) are skipped.
 - `jobs/ingest.py` is shared by live runs and `fireant normalize`, so a rebuild reproduces the warehouse.
-- Raw files are named `{chunk}__{HHMMSS}.json.gz` so same-day re-runs never overwrite.
+- Raw files are named `{chunk}__{HHMMSS}.json.gz` so same-day re-runs never overwrite. Files are created with `os.link` (never replaces); a second write in the same second gets `_001`, `_002`, ... (review of 2026-11-10).
 - Known simplification: `adj_ratio_segments` from multi-page or update-window fetches may be split at
   page/window boundaries; adjacent segments with equal `adj_ratio` belong together.
 - CLI: `probe`, `backfill`, `update`, `normalize [--dry-run]`, `status`. 76 tests pass.

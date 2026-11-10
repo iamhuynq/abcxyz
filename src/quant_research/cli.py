@@ -276,6 +276,16 @@ def cmd_portfolio(config: str, period: str) -> int:
     return 0
 
 
+def cmd_audit_masks() -> int:
+    from quant_research.mask_audit_report import build_report
+    _, research = _paths()
+    now = datetime.now(VN_TZ).replace(microsecond=0)
+    cross = research.parent / "cross.duckdb"
+    text = build_report(research, cross if cross.exists() else None, now)
+    print(f"Outcome-mask audit (descriptive, not logged): {_write_report(f'audit-masks-{now:%Y%m%dT%H%M%S}', text)}")
+    return 0
+
+
 def cmd_audit() -> int:
     from quant_research.audit import render
     warehouse, research = _paths()
@@ -365,7 +375,8 @@ def main(argv: list[str] | None = None) -> int:
     ix.add_argument("interactions_command", choices=("scan",))
     ix.add_argument("--period", default="research", choices=("research", "validation", "holdout", "forward"))
     au = sub.add_parser("audit", help="Data audits (descriptive, not logged)")
-    au.add_argument("audit_command", choices=("pit",), help="pit: point-in-time and survivorship audit")
+    au.add_argument("audit_command", choices=("pit", "masks"),
+                    help="pit: point-in-time and survivorship audit; masks: outcome-mask sensitivity (research)")
     fc = sub.add_parser("factors", help="Factor Engine (factor set f1)")
     fc.add_argument("factors_command", choices=("describe",),
                     help="describe: factor structure on the research period (descriptive, no returns)")
@@ -397,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "interactions":
             return cmd_interactions(args.period)
         if args.command == "audit":
-            return cmd_audit()
+            return cmd_audit_masks() if args.audit_command == "masks" else cmd_audit()
         if args.command == "factors":
             return cmd_factors_describe()
         if args.command == "registry":

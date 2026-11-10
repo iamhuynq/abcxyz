@@ -14,6 +14,10 @@ WITH f AS (
         lead(adj_close, 10) OVER w AS close_10,
         lead(adj_close, 20) OVER w AS close_20,
         lead(open_limit_up, 1) OVER w AS next_open_limit_up,
+        coalesce(bool_or(price_jump) OVER (w ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING), false)  AS jump_ahead_1,
+        coalesce(bool_or(price_jump) OVER (w ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING), false)  AS jump_ahead_3,
+        coalesce(bool_or(price_jump) OVER (w ROWS BETWEEN 1 FOLLOWING AND 5 FOLLOWING), false)  AS jump_ahead_5,
+        coalesce(bool_or(price_jump) OVER (w ROWS BETWEEN 1 FOLLOWING AND 10 FOLLOWING), false) AS jump_ahead_10,
         coalesce(bool_or(price_jump) OVER (w ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING), false) AS jump_ahead_20,
         CASE WHEN count(adj_high) OVER (w ROWS BETWEEN 1 FOLLOWING AND 5 FOLLOWING) = 5
              THEN max(adj_high) OVER (w ROWS BETWEEN 1 FOLLOWING AND 5 FOLLOWING) END AS max_high_5,
@@ -48,7 +52,38 @@ SELECT
          ELSE f.period <> CASE WHEN f.d20 <= DATE '2023-12-31' THEN 'research'
                                WHEN f.d20 <= DATE '2025-12-31' THEN 'validation'
                                WHEN f.d20 <= DATE '2026-10-02' THEN 'holdout'
-                               ELSE 'forward' END END AS crosses_period
+                               ELSE 'forward' END END AS crosses_period,
+    -- Per-horizon outcome masks (review of 2026-11-10): the same masks over the target's own window.
+    -- The two columns above keep the legacy 20-session window for recorded definitions.
+    f.jump_ahead_1  AS fwd_has_price_jump_1d,
+    f.jump_ahead_3  AS fwd_has_price_jump_3d,
+    f.jump_ahead_5  AS fwd_has_price_jump_5d,
+    f.jump_ahead_10 AS fwd_has_price_jump_10d,
+    CASE WHEN f.d1 IS NULL THEN NULL
+         ELSE f.period <> CASE WHEN f.d1 <= DATE '2023-12-31' THEN 'research'
+                               WHEN f.d1 <= DATE '2025-12-31' THEN 'validation'
+                               WHEN f.d1 <= DATE '2026-10-02' THEN 'holdout'
+                               ELSE 'forward' END END AS crosses_period_1d,
+    CASE WHEN f.d3 IS NULL THEN NULL
+         ELSE f.period <> CASE WHEN f.d3 <= DATE '2023-12-31' THEN 'research'
+                               WHEN f.d3 <= DATE '2025-12-31' THEN 'validation'
+                               WHEN f.d3 <= DATE '2026-10-02' THEN 'holdout'
+                               ELSE 'forward' END END AS crosses_period_3d,
+    CASE WHEN f.d5 IS NULL THEN NULL
+         ELSE f.period <> CASE WHEN f.d5 <= DATE '2023-12-31' THEN 'research'
+                               WHEN f.d5 <= DATE '2025-12-31' THEN 'validation'
+                               WHEN f.d5 <= DATE '2026-10-02' THEN 'holdout'
+                               ELSE 'forward' END END AS crosses_period_5d,
+    CASE WHEN f.d10 IS NULL THEN NULL
+         ELSE f.period <> CASE WHEN f.d10 <= DATE '2023-12-31' THEN 'research'
+                               WHEN f.d10 <= DATE '2025-12-31' THEN 'validation'
+                               WHEN f.d10 <= DATE '2026-10-02' THEN 'holdout'
+                               ELSE 'forward' END END AS crosses_period_10d,
+    CASE WHEN f.d20 IS NULL THEN NULL
+         ELSE f.period <> CASE WHEN f.d20 <= DATE '2023-12-31' THEN 'research'
+                               WHEN f.d20 <= DATE '2025-12-31' THEN 'validation'
+                               WHEN f.d20 <= DATE '2026-10-02' THEN 'holdout'
+                               ELSE 'forward' END END AS crosses_period_20d
 FROM f
 LEFT JOIN market_daily m1  ON m1.date  = f.d1
 LEFT JOIN market_daily m5  ON m5.date  = f.d5

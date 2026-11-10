@@ -8,7 +8,7 @@ import pytest
 
 from fireant_crawler.store.warehouse import Warehouse
 from quant_research.backtest.data import UniverseRule, load_market
-from quant_research.backtest.engine import run, signal_selector
+from quant_research.backtest.engine import random_selector, run, signal_selector
 from quant_research.build import build
 from quant_research.daily import FORWARD_START, FROZEN_STRATEGY, run_daily, run_paper
 from quant_research.daily_report import render_daily, write_reports
@@ -87,6 +87,35 @@ def test_paper_portfolio_is_a_deterministic_engine_run_on_the_forward_window(tmp
         direct = run(load_market(store.con, FORWARD_START, date(2099, 12, 31), RULE), FROZEN_STRATEGY, signal_selector)
     assert len(eq) == len(FORWARD_DAYS) and eq == eq2
     np.testing.assert_allclose(eq, direct.equity)
+
+
+def test_wide_controls_are_diagnostic_and_leave_the_preregistered_columns_unchanged(tmp_path, monkeypatch):
+    """The synthetic forward market is too small for random controls to trade, so each control's curve is
+    replaced by one that encodes its seed: the pre-registered band must come from seeds 0..n_random-1."""
+    import types
+
+    import quant_research.daily as daily
+    real_run = daily.run
+
+    def fake_run(m, s, selector=None, *args, **kwargs):
+        if isinstance(selector, tuple):
+            return types.SimpleNamespace(equity=np.full(len(m.dates), 1e9 * (1 + 0.01 * selector[1])))
+        return real_run(m, s, selector, *args, **kwargs)
+    monkeypatch.setattr(daily, "random_selector", lambda seed: ("seed", seed))
+    monkeypatch.setattr(daily, "run", fake_run)
+    rs = make(tmp_path)
+    cols = "random_p05, random_median, random_p95, wide_random_median, wide_exceedance_p, equity"
+    with ResultsStore(tmp_path / "results.duckdb", rs) as store:
+        run_daily(store, NOW, rule=RULE, n_random=4, n_wide=0)
+        narrow = store.con.execute(f"SELECT {cols} FROM paper_daily ORDER BY date").fetchall()
+        run_paper(store, FORWARD_DAYS[-1], rule=RULE, n_random=4, n_wide=30)
+        wide = store.con.execute(f"SELECT {cols} FROM paper_daily ORDER BY date").fetchall()
+    seeds4, seeds30 = 1e9 * (1 + 0.01 * np.arange(4)), 1e9 * (1 + 0.01 * np.arange(30))
+    assert [r[:3] for r in narrow] == [r[:3] for r in wide]           # the same pre-registered band
+    assert wide[-1][:3] == pytest.approx(tuple(np.percentile(seeds4, [5, 50, 95])))
+    assert all(r[3] is None and r[4] is None for r in narrow)
+    assert wide[-1][3] == pytest.approx(np.median(seeds30))
+    assert wide[-1][4] == pytest.approx((1 + (seeds30 >= wide[-1][5]).sum()) / 31)
 
 
 def test_report_renders_before_and_after_the_forward_start(tmp_path):

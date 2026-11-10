@@ -7,6 +7,7 @@ The research database is attached READ_ONLY as `rs`.
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from importlib import resources
@@ -68,8 +69,21 @@ FROM ranked;
 """
 
 
+def stored_params(params: "ResearchParams") -> dict[str, Any]:
+    """Parameters stored with a run. The mask settings appear only when they differ from the recorded
+    definition, so runs on the defaults store exactly what they stored before the masks were split out."""
+    out = asdict(params)
+    if tuple(out["outcome_masks"]) == OUTCOME_MASKS and out["mask_window"] == "legacy20":
+        del out["outcome_masks"], out["mask_window"]
+    return out
+
+
 class HoldoutLockedError(RuntimeError):
     pass
+
+
+OUTCOME_MASKS = ("quality", "execution", "period")
+MASK_HORIZONS = (1, 3, 5, 10, 20)
 
 
 @dataclass(frozen=True)
@@ -81,8 +95,53 @@ class ResearchParams:
     cost_round_trip: float = 0.004
     horizons: tuple[int, ...] = (5, 10, 20)
     extra: dict[str, Any] = field(default_factory=dict)
+    # Outcome masks applied on top of the point-in-time universe (review of 2026-11-10). The defaults are the
+    # recorded definition: all three masks over the legacy 20-session window. "horizon" uses each target's
+    # own window. Stored with a run only when they differ from the defaults (see stored_params).
+    outcome_masks: tuple[str, ...] = OUTCOME_MASKS
+    mask_window: str = "legacy20"
+
+    def __post_init__(self) -> None:
+        unknown = set(self.outcome_masks) - set(OUTCOME_MASKS)
+        if unknown or self.mask_window not in ("legacy20", "horizon"):
+            raise ValueError(f"Unknown outcome masks {sorted(unknown)} or mask window {self.mask_window!r}")
+
+    def point_in_time_sql(self) -> str:
+        """Universe known at the close of t: no outcome information."""
+        return (f"is_traded AND adv_value_20 > {self.min_adv_value} AND session_index > {self.min_session_index}"
+                " AND NOT price_jump AND NOT bad_source_date")
+
+    def mask_sql(self, target: str | None = None) -> str:
+        """The chosen outcome masks for one target column ("TRUE" when none). The horizon window takes the
+        horizon from the target's `_{h}d` suffix; a loader that reads several horizons at once (target None)
+        masks with the longest of `horizons`. The legacy window ignores the target."""
+        h = None
+        if self.mask_window == "horizon":
+            if target is None:
+                h = max(self.horizons)
+            else:
+                m = re.search(r"_(\d+)d$", target)
+                h = int(m.group(1)) if m else None
+            if h not in MASK_HORIZONS:
+                raise ValueError(f"No per-horizon mask for target {target!r} (horizons {self.horizons})")
+        parts = []
+        for mask in OUTCOME_MASKS:                  # fixed order: the SQL text does not depend on tuple order
+            if mask not in self.outcome_masks:
+                continue
+            if mask == "quality":
+                parts.append(f"NOT coalesce(fwd_has_price_jump_{h or 20}d, false)")
+            elif mask == "execution":
+                parts.append("NOT coalesce(entry_blocked, false)")
+            else:
+                parts.append(f"NOT coalesce({'crosses_period' if h is None else f'crosses_period_{h}d'}, false)")
+        return " AND ".join(parts) or "TRUE"
+
+    def sample_sql(self, target: str | None = None) -> str:
+        """Rows a research statistic uses: the point-in-time universe and the outcome masks."""
+        return f"{self.point_in_time_sql()} AND {self.mask_sql(target)}"
 
     def universe_sql(self) -> str:
+        """The recorded definition (all masks, legacy window); kept for the daily report and old callers."""
         return (f"is_traded AND adv_value_20 > {self.min_adv_value} AND session_index > {self.min_session_index}"
                 " AND NOT price_jump AND NOT coalesce(fwd_has_price_jump_20d, false) AND NOT bad_source_date"
                 " AND NOT coalesce(entry_blocked, false) AND NOT coalesce(crosses_period, false)")
@@ -155,8 +214,8 @@ class ResultsStore:
 
     def start_run(self, run_id: str, kind: str, period: str, params: ResearchParams, now: datetime,
                   pattern: tuple[str, str] | None = None) -> None:
-        config = json.dumps(asdict(params), default=str, sort_keys=True)
-        stored = {**asdict(params), "provenance": self.provenance(config)}
+        config = json.dumps(stored_params(params), default=str, sort_keys=True)
+        stored = {**stored_params(params), "provenance": self.provenance(config)}
         self.con.execute(
             "INSERT INTO research_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL)",
             [run_id, kind, pattern[0] if pattern else None, pattern[1] if pattern else None, period,
@@ -203,11 +262,11 @@ class ResultsStore:
 
     def universe_by_date(self, period: str, params: "ResearchParams", column: str) -> tuple:
         """(date ints, mean outcome per date, win rate) of the filtered universe; cached per run batch."""
-        key = (period, params.universe_sql(), column)
+        key = (period, params.sample_sql(column), column)
         cache = self._universe_cache
         if key not in cache:
             rows = self.con.execute(f"""SELECT date, avg({column}) AS m, avg(({column} > 0)::INT) AS w
-                FROM rs.feature_target WHERE {params.universe_sql()} AND period = ? AND {column} IS NOT NULL
+                FROM rs.feature_target WHERE {params.sample_sql(column)} AND period = ? AND {column} IS NOT NULL
                 GROUP BY date ORDER BY date""", [period]).fetchall()
             dates = np.array([r[0].toordinal() for r in rows], dtype=np.int64) - 719163  # days since 1970-01-01
             cache[key] = (dates, np.array([r[1] for r in rows], dtype=float), float(np.mean([r[2] for r in rows])) if rows else None)

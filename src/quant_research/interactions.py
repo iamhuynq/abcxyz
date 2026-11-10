@@ -41,7 +41,7 @@ def daily_ic(store: ResultsStore, period: str, params: ResearchParams) -> pd.Dat
     """date, factor, ic, n: Spearman via Pearson on average ranks, recomputed within the eligible rows."""
     return store.con.execute(f"""
         WITH t AS (SELECT symbol, date, {TARGET} AS y FROM rs.feature_target
-                   WHERE {params.universe_sql()} AND period = ? AND {TARGET} IS NOT NULL),
+                   WHERE {params.sample_sql(TARGET)} AND period = ? AND {TARGET} IS NOT NULL),
         s AS (SELECT f.date, f.factor, f.value, t.y FROM rs.stock_factors f JOIN t USING (symbol, date)),
         r AS (SELECT date, factor,
                      rank() OVER (PARTITION BY date, factor ORDER BY value)

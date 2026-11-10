@@ -26,6 +26,20 @@ df = con.sql("""
 | `period = 'research'` | <= 2023; `validation` 2024-2025; `holdout` 2026+ (do not look at holdout) |
 | `NOT crosses_period` | target window spills into the next period |
 
+Point-in-time universe and outcome masks (review of 2026-11-10). `ResearchParams.point_in_time_sql()` is
+the universe known at the close of t (`is_traded`, ADV, age, `NOT price_jump`, `NOT bad_source_date`).
+Outcome masks are separate and named:
+
+| Mask | Column (legacy 20-session window) | Per-horizon column (h = 1, 3, 5, 10, 20) |
+|------|-----------------------------------|-------------------------------------------|
+| `quality` | `fwd_has_price_jump_20d` | `fwd_has_price_jump_{h}d` |
+| `execution` | `entry_blocked` | same (the next open) |
+| `period` | `crosses_period` | `crosses_period_{h}d` |
+
+`ResearchParams.sample_sql(target)` = universe AND the chosen masks. The defaults (all three masks, legacy
+window) are the recorded definition used by every logged run; `mask_window="horizon"` is for new
+definitions.
+
 ## Conventions
 
 - t = the session of the row. **Features use data <= t; targets use data > t** (separate tables).
@@ -80,6 +94,7 @@ Flags: `is_traded`, `limit_up`, `limit_down` (approximate, see below), `bad_sour
 | `entry_blocked` | t+1 opens at the (approximate) ceiling: the buy is unrealistic |
 | `fwd_has_price_jump_20d` | a `price_jump` occurs in t+1..t+20: exclude |
 | `target_complete`, `crosses_period` | 20 future sessions exist; target window spills into the next period |
+| `fwd_has_price_jump_{h}d`, `crosses_period_{h}d` | the same masks over the target's own window, h = 1, 3, 5, 10 (and `crosses_period_20d`) |
 
 ## stock_factors (Factor Engine, factor set f1)
 

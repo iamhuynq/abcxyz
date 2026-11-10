@@ -148,7 +148,7 @@ def run_h2_large_to_small(store: ResultsStore, period: str, params: ResearchPara
             SELECT v.date, any_value(v.large_ret_1d) - any_value(m.mkt_ret_1d) AS x, any_value(m.mkt_ret_1d) AS mkt,
                    avg(v.{y}) AS y
             FROM {VIEW} v JOIN rs.market_daily m USING (date)
-            WHERE {params.universe_sql()} AND v.period = ? AND NOT v.in_cross_universe AND v.large_ret_1d IS NOT NULL
+            WHERE {params.sample_sql(y)} AND v.period = ? AND NOT v.in_cross_universe AND v.large_ret_1d IS NOT NULL
               AND m.mkt_ret_1d IS NOT NULL AND v.{y} IS NOT NULL
             GROUP BY v.date HAVING count(*) >= ? ORDER BY v.date""", [period, params.min_stocks_per_date]).fetchall()
         arr = np.array([r[1:] for r in rows], dtype=float).reshape(-1, 3)

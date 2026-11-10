@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STARTING_GRACE_SECONDS = 30
 HISTORY_LIMIT = 50
 
+EXIT_BUSY = 9                                       # daily.sh: another run holds the lock
 EXIT_MEANINGS = {
     0: "ok",
     1: "failed (see log)",
@@ -34,6 +35,7 @@ EXIT_MEANINGS = {
     5: "holdout locked",
     7: "latest session incomplete in the source; retry later",
     8: "validation found error-level problems; build stopped (see the validation report)",
+    9: "busy: another run holds the pipeline lock; nothing done",
     10: "offline or API down; nothing changed",
 }
 
@@ -124,6 +126,8 @@ class RunRecord:
         if self.refused:
             return "refused"
         if self.ended_at:
+            if self.exit_code == EXIT_BUSY and not self.cancelled:
+                return "refused"                    # daily.sh found the lock held: nothing ran
             if self.cancelled:
                 return "cancelled"
             return "ok" if self.exit_code == 0 else "failed"

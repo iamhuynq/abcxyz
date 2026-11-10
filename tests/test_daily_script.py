@@ -75,7 +75,7 @@ def test_live_lock_makes_a_second_run_exit_and_stale_lock_is_replaced(tmp_path):
     lock.mkdir(parents=True)
     (lock / "pid").write_text(str(os.getpid()))                    # a live process holds the lock
     rc, calls, out = run(tmp_path)
-    assert rc == 0 and calls == [] and "in progress" in out
+    assert rc == 9 and calls == [] and "in progress" in out         # refused, not "done"
     (lock / "pid").write_text("999999")                             # dead pid: stale
     rc, calls, _ = run(tmp_path)
     assert rc == 0 and calls and not lock.exists()

@@ -3,7 +3,7 @@
 # Safe to trigger many times a day: it exits early when today's run already succeeded, when another run
 # holds the lock, or when the network/API is down (exit 10: retry at the next trigger).
 # Exit codes: 0 done (or nothing to do), 3 token expired, 7 latest session incomplete, 8 validation errors,
-# 10 offline, other = failure.
+# 9 refused (another run holds the lock; nothing done), 10 offline, other = failure.
 set -u
 export TZ=Asia/Ho_Chi_Minh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,7 +51,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   pid="$(cat "$LOCK/pid" 2>/dev/null || echo 0)"
   age=$(( $(date +%s) - $(mtime "$LOCK") ))
   if kill -0 "$pid" 2>/dev/null && [ "$age" -lt 10800 ]; then
-    echo "Another run (pid $pid) is in progress."; exit 0
+    echo "Another run (pid $pid) is in progress; nothing done."; exit 9
   fi
   log "Removing stale lock (pid $pid, age ${age}s)"
   rm -rf "$LOCK"; mkdir "$LOCK"

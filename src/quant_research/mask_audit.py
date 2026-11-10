@@ -147,7 +147,8 @@ def concentration(store: ResultsStore, params: ResearchParams = ResearchParams()
 
 def compare(results: dict[str, dict[str, pd.DataFrame]], table: str, keys: tuple[str, ...]) -> pd.DataFrame:
     """One row per test: the reference effect and, per configuration, the effect and whether the declared
-    rule marks it mask-sensitive (sign change, or q / p < 0.05 status flip when q is not available)."""
+    rule marks it mask-sensitive (sign change, or q / p < 0.05 status flip when q is not available), and
+    whether it is material (significant under the reference and its sign changes)."""
     ref = results[REFERENCE][table]
     if ref.empty:
         return pd.DataFrame()
@@ -164,5 +165,16 @@ def compare(results: dict[str, dict[str, pd.DataFrame]], table: str, keys: tuple
         flip_sig = ((base["ref_sig"] < Q_MAX) != (base[f"{name}_sig"] < Q_MAX)) if level else False
         both = base["ref_effect"].notna() & base[f"{name}_effect"].notna() & (base["ref_effect"] != 0)
         base[f"{name}_sensitive"] = both & (flip_sign | flip_sig)
+        # the material case: an effect significant under the recorded definition that changes sign
+        base[f"{name}_material"] = (both & flip_sign & (base["ref_sig"] < Q_MAX)) if level else both & False
     base.attrs["level"] = level
     return base
+
+
+def candidates(results: dict[str, dict[str, pd.DataFrame]]) -> dict[str, set[str]]:
+    """Interaction tests passing the declared candidate rule, per configuration (scratch-family q)."""
+    out = {}
+    for name, tables in results.items():
+        ix = tables["interactions"]
+        out[name] = set(ix.loc[ix["candidate"].astype(bool), "name"]) if len(ix) else set()
+    return out

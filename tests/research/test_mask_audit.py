@@ -21,10 +21,12 @@ def tables(effect, q):
 
 def test_rule_flags_sign_changes_and_significance_flips_only():
     ref = tables([0.01, 0.01, -0.02, 0.03], [0.01, 0.20, 0.01, 0.01])
-    other = tables([-0.01, 0.02, -0.03, 0.031], [0.01, 0.01, 0.02, 0.04])
+    other = tables([-0.01, -0.02, -0.03, 0.031], [0.01, 0.01, 0.02, 0.04])
     cmp = ma.compare({ma.REFERENCE: ref, "baseline": other}, "patterns", ("name", "horizon"))
-    # a: sign flips; b: q crosses 0.05; c: same sign, both significant; d: unchanged
+    # a: significant, sign flips; b: not significant, sign flips and q crosses 0.05; c: same sign, both
+    # significant; d: unchanged
     assert list(cmp["baseline_sensitive"]) == [True, True, False, False]
+    assert list(cmp["baseline_material"]) == [True, False, False, False]          # only a: significant, flips
 
 
 def test_rule_ignores_missing_tests():
@@ -61,4 +63,5 @@ def test_audit_runs_end_to_end_without_touching_real_results(research, monkeypat
     monkeypatch.setattr("quant_research.mask_audit_report.OTHERS", ["baseline"])
     text = render(results, ex, prov, NOW)
     assert "## 3. Mask-sensitive tests per configuration" in text
+    assert "Interaction candidates" in text and "| combined |" in text
     assert set(summary(results)["analysis"]) >= {"patterns"}

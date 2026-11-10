@@ -40,8 +40,8 @@ def summary(results: dict) -> pd.DataFrame:
             continue
         row = {"analysis": table, "tests": int(cmp["ref_effect"].notna().sum())}
         for name in OTHERS:
-            col = f"{name}_sensitive"
-            row[name] = int(cmp[col].sum()) if col in cmp else None
+            col, mat = f"{name}_sensitive", f"{name}_material"
+            row[name] = f"{int(cmp[col].sum())} ({int(cmp[mat].sum())})" if col in cmp else None
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -95,12 +95,22 @@ def render(results: dict, extras: dict[str, pd.DataFrame], prov: dict, now: date
     sample = sample[["config", "target", "rows", "mean", "p05", "p50", "p95"]]
     lines += _md(sample, {"rows": ",", "mean": "+.4%", "p05": "+.2%", "p50": "+.2%", "p95": "+.2%"})
     lines += ["", "Share of point-in-time rows each mask removes, per year (10-session target):", ""]
-    lines += _md(extras["by_year"], {"rows": ",", "quality": ".2%", "execution": ".2%", "period": ".2%"})
+    lines += _md(extras["by_year"].astype({"year": int, "rows": int}),
+                 {"rows": ",", "quality": ".2%", "execution": ".2%", "period": ".2%"})
     lines += ["", "## 2. Concentration: share of each pattern's point-in-time hits removed by each mask", "",
               "The first row is all point-in-time rows. A pattern far above it is where a mask matters.", ""]
     lines += _md(extras["concentration"], {"hits": ",", "quality": ".2%", "execution": ".2%", "period": ".2%"})
     lines += ["", "## 3. Mask-sensitive tests per configuration", ""]
+    lines += ["Each cell: tests the declared rule marks mask-sensitive (in brackets: material ones, i.e. significant "
+              "under `combined` and changing sign).", ""]
     lines += _md(summary(results), {})
+    cands = ma.candidates(results)
+    ref_c = cands[ma.REFERENCE]
+    lines += ["", f"Interaction candidates (declared rule, scratch-family q): {len(ref_c)} under `combined`.", "",
+              "| config | candidates | added | dropped |", "|---|---|---|---|"]
+    for name, c in cands.items():
+        lines.append(f"| {name} | {len(c)} | {', '.join(sorted(c - ref_c)) or '-'} | "
+                     f"{', '.join(sorted(ref_c - c)) or '-'} |")
     lines += ["", "Rank agreement of the test statistics with `combined` (Spearman):", ""]
     lines += _md(ranks(results), {n: ".3f" for n in OTHERS})
     for i, (table, keys, title) in enumerate(SECTIONS, start=4):

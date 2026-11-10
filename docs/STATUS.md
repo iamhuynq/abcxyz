@@ -1,11 +1,17 @@
 # Project status
 
-Last updated: 2026-10-15. Update this file at the end of every task.
+Last updated: 2026-11-10. Update this file at the end of every task.
 
 ## Data
 
-- Warehouse through session 2026-10-07 (`data/.daily_done` = 2026-10-07). Collection is manual.
-- Paper portfolio (frozen strategy, forward data) started 2026-10-06.
+- Warehouse, research and cross databases through session 2026-11-09 (`data/.daily_done` = 2026-11-09),
+  updated 2026-11-10. Collection is manual: the user asks, or runs `scripts/daily.sh` then
+  `quant cross build`. No scheduler (confirmed again 2026-10-24).
+- Paper portfolio (frozen strategy, forward data) since 2026-10-03. At 2026-11-09, after 26 sessions:
+  - strategy +1.86%, above the p95 of the random controls (-0.08%; median -2.23%);
+  - equal weight -1.84%, VNINDEX -2.22%;
+  - before realistic costs, and too short a sample to conclude anything.
+- Avoid signal hits on forward data: KOS (2026-10-27, 2026-10-29), HIO (2026-10-29), POM (2026-10-30).
 
 ## Roadmap (design doc phases)
 
@@ -68,7 +74,7 @@ Registry). Summary:
   hyphen suffix; ICB codes are digits only. `/symbols/all-financial-data` and other lower-case endpoint
   names are rejected. All 2,012 warehouse symbols and every ICB code still pass.
 - Execution and data audit (external review of 2026-10-09; plan `execution-audit-plan.md`, branch
-  `execution-audit`, not pushed).
+  `execution-audit`; merged as PR #2).
   - **Phase A done:** per-lot T+2, invalid ADV blocked in both engines, marks at last traded closes
     (the paper portfolio keeps its pre-registered marks and adds a traded-mark line), invariant tests,
     and error-level validation that stops `daily.sh` (exit 8). The re-runs change no verdict.
@@ -90,8 +96,8 @@ Registry). Summary:
   - Branch `execution-audit`, PR #2. Its review asked for three fixes: NULL validation, the worse
     valuation in the verdict, and `last_trade` in legacy mode. They are a new commit, and the grid was
     re-run with no verdict change. The user pushes and merges.
-- Review of 2026-10-10 (plan `review-2026-10-10-fixes-plan.md`, branch `review-2026-10-10-fixes`, not
-  pushed):
+- Review of 2026-10-10 (plan `review-2026-10-10-fixes-plan.md`, branch `review-2026-10-10-fixes`, merged as
+  PR #3, `f0afc3f`):
   - run lifecycle running / ok / failed;
   - the paper portfolio only uses complete sessions;
   - exact Spearman and tie-break in the decile scan (research scan re-run; no logged test crosses 0.05);

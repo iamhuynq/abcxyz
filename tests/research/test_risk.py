@@ -124,3 +124,19 @@ def test_stale_floor_and_unknown_trade_are_conditional():
     assert f.conditional and "floor" in f.reason
     u = liquidity.position("X", 1e8, 1e9, 0.002, 0.02, None, False)
     assert u.stale is None and u.conditional
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_non_finite_returns_make_tail_and_volatility_unavailable(bad):
+    r = np.array([bad] + [-0.01] * 30)
+    t = metrics.historical_var_es(r, 0.95, min_obs=20)
+    assert (t.var, t.es) == (None, None) and t.reason == "1 non-finite returns" and t.n == 31
+    assert metrics.volatility(r) is None and metrics.downside_volatility(r) is None
+    assert metrics.historical_var_es(r[1:], 0.95, min_obs=20).var == pytest.approx(0.01)
+
+
+def test_threshold_is_inclusive_up_to_float_rounding():
+    dd = Limit("dd", "d", "min", -0.20, -0.30)
+    assert limits.check(dd, 1.0 / 1.25 - 1).status == WARNING              # -0.19999999999999996
+    assert limits.check(dd, -0.1999999).status == PASS
+    assert limits.check(MAX, 0.1 - 1e-15).status == WARNING and limits.check(MAX, 0.0999999).status == PASS

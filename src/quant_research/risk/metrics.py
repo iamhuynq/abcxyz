@@ -2,7 +2,8 @@
 
 Conventions: daily simple returns of a net equity curve (costs included); annualization by sqrt(250), as in
 backtest/metrics.py; a loss is a positive number in VaR / ES. Every function returns None (not 0, not NaN)
-when its input is too short, so a missing value can never pass a limit.
+when its input is too short or holds a non-finite value (nothing is dropped silently), so a missing value can
+never pass a limit.
 """
 
 import math
@@ -42,14 +43,16 @@ def drawdown(equity: np.ndarray) -> Drawdown | None:
 
 def volatility(rets: np.ndarray) -> float | None:
     r = np.asarray(rets, dtype=float)
-    return float(r.std(ddof=1) * math.sqrt(SESSIONS_PER_YEAR)) if len(r) > 1 else None
+    if len(r) < 2 or not np.all(np.isfinite(r)):
+        return None
+    return float(r.std(ddof=1) * math.sqrt(SESSIONS_PER_YEAR))
 
 
 def downside_volatility(rets: np.ndarray, threshold: float = 0.0) -> float | None:
     """Annualized root mean square of the shortfall below `threshold`, over all sessions (a session above the
     threshold counts as 0). The denominator is n - 1, as for the volatility."""
     r = np.asarray(rets, dtype=float)
-    if len(r) < 2:
+    if len(r) < 2 or not np.all(np.isfinite(r)):
         return None
     short = np.minimum(r - threshold, 0.0)
     return float(math.sqrt((short ** 2).sum() / (len(r) - 1)) * math.sqrt(SESSIONS_PER_YEAR))
@@ -63,17 +66,24 @@ class TailRisk:
     n: int                          # returns used
     tail: int                       # sessions in the tail (the k worst)
     min_obs: int
+    reason: str = ""                # why var / es are None
 
 
 def historical_var_es(rets: np.ndarray, confidence: float, min_obs: int | None = None) -> TailRisk:
     """Historical VaR and Expected Shortfall. The tail is the k = ceil(n x (1 - confidence)) worst returns; VaR
-    is the loss of the k-th worst, ES the mean loss of the k worst. Below `min_obs` returns both are None."""
-    r = np.sort(np.asarray(rets, dtype=float))
+    is the loss of the k-th worst, ES the mean loss of the k worst. Below `min_obs` returns, or with any
+    non-finite return, both are None and `reason` says why. Even at the minimum the 99% tail holds only 5
+    returns: these are historical estimates, not loss ceilings or stable forecasts."""
+    raw = np.asarray(rets, dtype=float)
     need = MIN_OBS_VAR.get(confidence, 250) if min_obs is None else min_obs
-    n = len(r)
+    n = len(raw)
     k = max(1, math.ceil(round(n * (1 - confidence), 9))) if n else 0
+    bad = int((~np.isfinite(raw)).sum())
+    if bad:
+        return TailRisk(confidence, None, None, n, k, need, f"{bad} non-finite returns")
     if n < need or n == 0:
-        return TailRisk(confidence, None, None, n, k, need)
+        return TailRisk(confidence, None, None, n, k, need, f"{n} returns < {need} required")
+    r = np.sort(raw)
     return TailRisk(confidence, float(-r[k - 1]), float(-r[:k].mean()), n, k, need)
 
 

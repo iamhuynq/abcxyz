@@ -22,7 +22,7 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     target.add_argument("--paper", action="store_true", help="the current paper-portfolio record")
     target.add_argument("--backtest", metavar="RUN", help="a stored backtest run id")
     ev.add_argument("--date", help="valuation date for --backtest (YYYY-MM-DD; default: the run's last session)")
-    ev.add_argument("--policy", default=limits.DEFAULT_V1.key, choices=sorted(limits.POLICIES))
+    ev.add_argument("--policy", default=limits.DEFAULT.key, choices=sorted(limits.POLICIES))
     rs.add_parser("policies", help="List the declared risk policies and their limits")
     rp = rs.add_parser("report", help="Re-render the report of a stored risk run")
     rp.add_argument("run_id")

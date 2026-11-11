@@ -52,6 +52,7 @@ class Snapshot:
     positions: pd.DataFrame                      # symbol, shares, price, value
     curves: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)   # name -> (dates, equity)
     notes: list[str] = field(default_factory=list)
+    reconciliation_gap: float | None = None      # NAV - cash - positions; None when cash is derived from the NAV
 
 
 def paper_snapshot(con: duckdb.DuckDBPyConnection) -> Snapshot | None:
@@ -70,8 +71,11 @@ def paper_snapshot(con: duckdb.DuckDBPyConnection) -> Snapshot | None:
     curves = {"pre-registered marks": (dates, daily["equity"].to_numpy(float))}
     if daily["equity_traded_mark"].notna().all():
         curves["traded marks"] = (dates, daily["equity_traded_mark"].to_numpy(float))
-    return Snapshot(f"paper:{run_date}", pd.Timestamp(daily["date"].iloc[-1]).date(), nav, nav - float(pos["value"].sum()), pos, curves,
-                    ["Positions are valued at the pre-registered marks (last close, legacy mode)."])
+    notes = ["Positions are valued at the pre-registered marks (last close, legacy mode).",
+             "The paper record stores no cash: cash is NAV minus positions, so no reconciliation is possible."]
+    day = pd.Timestamp(daily["date"].iloc[-1]).date()
+    return Snapshot(f"paper:{run_date}", day, nav, nav - float(pos["value"].sum(min_count=1) or 0.0), pos, curves,
+                    notes)
 
 
 def backtest_snapshot(con: duckdb.DuckDBPyConnection, run_id: str, on: date | None = None) -> Snapshot | None:
@@ -91,12 +95,12 @@ def backtest_snapshot(con: duckdb.DuckDBPyConnection, run_id: str, on: date | No
     held["price"] = held["symbol"].map(prices)
     held["value"] = held["shares"] * held["price"]
     nav, cash = float(daily["equity"].iloc[-1]), float(daily["cash"].iloc[-1])
-    gap = nav - cash - float(held["value"].sum())
+    gap = nav - cash - float(held["value"].sum())              # NaN when a position has no price
     gap = 0.0 if abs(gap) < 0.5 else gap                       # below half a dong: rounding, printed as 0
     notes = [f"Positions rebuilt from the stored trades; positions + cash differ from the stored equity by "
              f"{gap:,.0f} VND ({gap / nav:.4%})."]
     curves = {"stored equity": (daily["date"].to_numpy(), daily["equity"].to_numpy(float))}
-    return Snapshot(f"backtest:{run_id}", day, nav, cash, held, curves, notes)
+    return Snapshot(f"backtest:{run_id}", day, nav, cash, held, curves, notes, gap)
 
 
 def _last_traded_close(con: duckdb.DuckDBPyConnection, symbols: tuple[str, ...], on: date) -> dict[str, float]:
@@ -109,8 +113,10 @@ def _last_traded_close(con: duckdb.DuckDBPyConnection, symbols: tuple[str, ...],
 
 
 def market_inputs(con: duckdb.DuckDBPyConnection, symbols: tuple[str, ...], on: date) -> pd.DataFrame:
-    """Per symbol at the close of `on`: ADV20, half-spread and sigma (cost inputs of that close), ICB level-2
-    code, last traded date, sessions since it, and whether it closed at the floor."""
+    """Per symbol at the close of `on`: ADV20, half-spread and sigma (cost inputs of that close), the ICB level-2
+    code, last traded date, sessions since it, and whether it closed at the floor. The ICB code is the CURRENT
+    classification: daily_panel copies it from today's symbol table on every row (no history; integrity
+    finding E-1), so it is not point in time."""
     cols = ["symbol", "adv", "half_spread", "sigma", "industry", "last_trade", "stale_sessions", "at_floor"]
     if not symbols:
         return pd.DataFrame(columns=cols)
@@ -121,8 +127,8 @@ def market_inputs(con: duckdb.DuckDBPyConnection, symbols: tuple[str, ...], on: 
                  WHERE symbol IN ({marks}) AND date <= ? AND is_traded GROUP BY 1),
         cal AS (SELECT date FROM rs.market_daily WHERE date <= ?),
         today AS (SELECT symbol, industry_l2_code, limit_down FROM rs.daily_panel WHERE date = ?),
-        ind AS (SELECT symbol, arg_max(industry_l2_code, date) AS industry_l2_code FROM rs.daily_panel
-                WHERE symbol IN ({marks}) AND date <= ? GROUP BY 1)
+        ind AS (SELECT symbol, any_value(industry_l2_code) AS industry_l2_code FROM rs.daily_panel
+                WHERE symbol IN ({marks}) AND date <= ? GROUP BY 1)                 -- current classification
         SELECT s.symbol, c.adv_value_20 AS adv, c.half_spread, c.sigma_20 AS sigma, ind.industry_l2_code AS industry,
                last.last_trade,
                (SELECT count(*) FROM cal WHERE cal.date > last.last_trade) AS stale_sessions,

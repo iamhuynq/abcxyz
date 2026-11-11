@@ -8,16 +8,25 @@ LIMITATIONS = (
     "A PASS means the declared policy is met with the available inputs. It does not mean the portfolio is safe or "
     "profitable.",
     "The policy is provisional: it was declared before any evaluation and not tuned on any outcome.",
-    "VaR and Expected Shortfall are historical, daily, from the portfolio's own net equity curve. They are not "
-    "loss ceilings and need 250 (95%) or 500 (99%) returns.",
+    "VaR and Expected Shortfall are historical, daily, from the portfolio's own net equity curve, and need 250 "
+    "(95%) or 500 (99%) finite returns. Even then the 99% tail holds about 5 returns (the tail count is in each "
+    "note): they are historical estimates, not loss ceilings or stable forecasts.",
     "Beta, volatility and effective bets come from the Exposure Engine: 120 sessions of clean daily returns. A "
     "position with fewer than 80% of them makes these limits INCOMPLETE.",
     "Liquidation estimates assume selling at most the stated share of ADV20 per session with cost model v1. They do "
     "not guarantee execution. Price limits and suspensions can block a sale (see the conditional weight).",
-    f"Valuation: the portfolio's own marks, and a write-down that values positions without a trade for more than "
-    f"{WRITEDOWN_SESSIONS} sessions at 0. The drawdown limit is judged on the worse.",
-    "Industries are ICB level 2 at their current value (no history). Clusters are point-in-time: the last month "
-    "end on or before the valuation date.",
+    f"Drawdown: policy v2 checks the worst observed drawdown of the stored equity curves (history) and, "
+    f"separately, the current drawdown if positions without a trade for more than {WRITEDOWN_SESSIONS} sessions were "
+    f"valued at 0 (a valuation assumption, not an observed loss). Policy v1 took the worse of the two.",
+    "Industries are ICB level 2 at their current classification (no history, so not point in time for a past "
+    "date). Clusters are point in time: the last month end on or before the valuation date; holdings outside the "
+    "cluster universe (top 200 by liquidity) have none.",
+    "Group limits are computed on labelled holdings; any unlabelled holding makes them INCOMPLETE, and the "
+    "Concentration section shows the unlabelled weight and a conservative value that counts it as one group.",
+    "Positions must have finite, positive shares, price and value, and positions + cash must match the NAV within "
+    "1%; otherwise every limit that uses the positions is INCOMPLETE.",
+    "Liquidation cost uses fallback spread or volatility where the inputs are missing (cost_fallback_weight); it "
+    "changes the cost estimate only, which no limit uses.",
 )
 
 
@@ -30,7 +39,10 @@ def _v(x, pct: bool = False) -> str:
 PCT = {"max_position_weight", "max_industry_weight", "max_cluster_weight", "illiquid_weight", "stale_weight",
        "max_drawdown", "invested_share", "current_drawdown", "volatility_ann", "downside_volatility_ann",
        "var_95_1d", "es_95_1d", "var_99_1d", "es_99_1d", "liquidation_cost_share", "missing_returns_weight",
-       "volatility_ann_positions", "conditional_weight"}
+       "volatility_ann_covered_positions_scaled_to_nav", "conditional_weight", "max_drawdown_historical",
+       "current_drawdown_write_down", "cost_fallback_weight", "max_industry_weight_labelled",
+       "industry_unlabelled_weight", "max_industry_weight_unlabelled_as_one", "max_cluster_weight_labelled",
+       "cluster_unlabelled_weight", "max_cluster_weight_unlabelled_as_one"}
 
 
 def render(store: ResultsStore, run_id: str) -> str:
@@ -58,7 +70,8 @@ def render(store: ResultsStore, run_id: str) -> str:
         lines.append(f"| {name} | {_v(value, pct)} | {_v(w, pct)} | {_v(b, pct)} | {st} | {reason or ''} | {aff or ''} |")
     rows = con.execute("SELECT scope, metric, value, note FROM risk_metrics WHERE run_id = ? ORDER BY scope, metric",
                        [run_id]).fetchall()
-    for title, prefix in (("Portfolio", "portfolio"), ("Equity curves", "curve:"), ("Valuation", "valuation:"),
+    for title, prefix in (("Portfolio", "portfolio"), ("Concentration", "concentration"), ("Equity curves", "curve:"),
+                          ("Valuation", "valuation:"),
                           ("Liquidity", "liquidity"), ("Factor tilts (display only)", "tilt")):
         sel = [r for r in rows if r[0].startswith(prefix)]
         if sel:

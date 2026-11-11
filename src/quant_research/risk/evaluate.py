@@ -22,6 +22,8 @@ from quant_research.risk.limits import LimitResult, Policy
 
 MODEL_VERSION = "risk-v1"
 ALLOWED_PERIODS = ("research", "forward")       # validation and holdout are frozen: never re-read for risk
+RECONCILIATION_TOLERANCE = 0.01                  # |NAV - cash - positions| above this share of NAV: INCOMPLETE
+HISTORY_ONLY = ("max_drawdown_historical",)      # limits that need only the stored equity curves, not the positions
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS risk_policies (
@@ -58,15 +60,23 @@ def _f(x) -> float | None:
     return None if x is None or (isinstance(x, float) and not np.isfinite(x)) else float(x)
 
 
-def _group_max(weights: pd.Series, labels: pd.Series, warning: float) -> tuple[float | None, tuple, str]:
-    """Largest group weight, the groups at or above `warning`, and why it is unavailable ("" if available)."""
-    lacking = tuple(labels.index[labels.isna()])
+@dataclass(frozen=True)
+class _Groups:
+    top_known: float                # largest weight among labelled groups
+    top_as_one: float               # the same, with every unlabelled holding counted as one more group (conservative)
+    affected: tuple                 # labelled groups at or above the warning
+    unlabelled: tuple               # holdings without a label
+    unlabelled_weight: float
+
+
+def _group_max(weights: pd.Series, labels: pd.Series, warning: float) -> _Groups:
+    lacking = tuple(sorted(labels.index[labels.isna()]))
     if len(weights) == 0:
-        return 0.0, (), ""
-    g = weights.groupby(labels.fillna("unknown")).sum()
-    known = g.drop("unknown", errors="ignore")
+        return _Groups(0.0, 0.0, (), (), 0.0)
+    known = weights[labels.notna()].groupby(labels[labels.notna()]).sum()
     top = float(known.max()) if len(known) else 0.0
-    return top, tuple(sorted(known.index[known >= warning])), (f"no label for {', '.join(lacking)}" if lacking else "")
+    rest = float(weights[labels.isna()].sum())
+    return _Groups(top, max(top, rest), tuple(sorted(known.index[known >= warning])), lacking, rest)
 
 
 def _curve_metrics(name: str, equity: np.ndarray) -> tuple[list, metrics.Drawdown | None]:
@@ -79,7 +89,7 @@ def _curve_metrics(name: str, equity: np.ndarray) -> tuple[list, metrics.Drawdow
              (scope, "downside_volatility_ann", metrics.downside_volatility(rets), "shortfall below 0, sqrt(250)")]
     for conf in (0.95, 0.99):
         t = metrics.historical_var_es(rets, conf)
-        why = "" if t.var is not None else f"{t.n} returns < {t.min_obs} required"
+        why = t.reason
         lvl = int(round(conf * 100))
         rows += [(scope, f"var_{lvl}_1d", t.var, why or f"historical, n {t.n}, tail {t.tail}"),
                  (scope, f"es_{lvl}_1d", t.es, why or f"mean of the {t.tail} worst returns")]
@@ -104,15 +114,45 @@ def assess(snap: data.Snapshot, inputs: pd.DataFrame, rets: dict, cluster_of: di
     if not nav or nav <= 0 or not np.isfinite(nav):
         res = limits.evaluate(policy, {}, missing={lim.metric: "NAV missing or not positive" for lim in policy.limits})
         return Assessment(limits.INCOMPLETE, res, [], pos, ["NAV missing or not positive"])
+    issues, unvalued = _snapshot_issues(snap)
+    pos["value"] = pos["value"].where(~pos["symbol"].isin(unvalued), 0.0)   # computed on, but never trusted
     pos["weight"] = pos["value"] / nav
     pos["cluster"] = pos["symbol"].map(cluster_of)
     acc = _Acc({lim.metric: lim.warning for lim in policy.limits})
+    acc.out += [("portfolio", "unvalued_positions", float(len(unvalued)), ", ".join(unvalued)),
+                ("portfolio", "reconciliation_gap", snap.reconciliation_gap,
+                 "NAV - cash - positions" if snap.reconciliation_gap is not None else "not applicable: cash derived")]
     invested = _concentration(pos, snap, acc)
     pos = _exposure(pos, nav, invested, rets, factor_z, acc)
     pos = _liquidity(pos, nav, liq, acc)
     _drawdowns(pos, snap, acc)
+    if issues:          # the positions cannot be trusted: every limit that uses them is INCOMPLETE
+        for lim in policy.limits:
+            if lim.metric not in HISTORY_ONLY:
+                acc.missing[lim.metric] = "; ".join(issues + ([acc.missing[lim.metric]] if lim.metric in acc.missing
+                                                              else []))
     results = limits.evaluate(policy, acc.vals, acc.affected, acc.missing)
     return Assessment(limits.overall(results), results, acc.out, pos, list(snap.notes))
+
+
+def _snapshot_issues(snap: data.Snapshot) -> tuple[list[str], tuple[str, ...]]:
+    """Why the positions cannot be trusted: a position without finite, positive shares, price and value; cash
+    that is not finite; or positions + cash that miss the NAV by more than RECONCILIATION_TOLERANCE."""
+    p = snap.positions
+    ok = pd.Series(True, index=p.index)
+    for col in ("shares", "price", "value"):
+        if col in p:
+            v = pd.to_numeric(p[col], errors="coerce")
+            ok &= v.notna() & np.isfinite(v.fillna(np.nan).astype(float)) & (v > 0)
+    unvalued = tuple(sorted(p.loc[~ok, "symbol"]))
+    issues = [f"positions without a valid value: {', '.join(unvalued)}"] if unvalued else []
+    if snap.cash is None or not np.isfinite(snap.cash):
+        issues.append("cash missing or not finite")
+    gap = snap.reconciliation_gap
+    if gap is not None and (not np.isfinite(gap) or abs(gap) > RECONCILIATION_TOLERANCE * snap.nav):
+        issues.append(f"positions + cash miss the NAV by {gap / snap.nav:.2%} (tolerance "
+                      f"{RECONCILIATION_TOLERANCE:.0%})" if np.isfinite(gap) else "positions + cash do not reconcile")
+    return issues, unvalued
 
 
 def _concentration(pos: pd.DataFrame, snap: data.Snapshot, acc: _Acc) -> float:
@@ -121,10 +161,16 @@ def _concentration(pos: pd.DataFrame, snap: data.Snapshot, acc: _Acc) -> float:
     acc.vals["max_position_weight"] = float(w.max()) if len(w) else 0.0
     acc.affected["max_position_weight"] = tuple(sorted(w.index[w >= acc.warn.get("max_position_weight", 1.0)]))
     for metric, col in (("max_industry_weight", "industry"), ("max_cluster_weight", "cluster")):
-        top, aff, why = _group_max(w, pos.set_index("symbol")[col], acc.warn.get(metric, 1.0))
-        acc.vals[metric], acc.affected[metric] = top, aff
-        if why:
-            acc.missing[metric] = why
+        g = _group_max(w, pos.set_index("symbol")[col], acc.warn.get(metric, 1.0))
+        acc.vals[metric], acc.affected[metric] = g.top_known, g.affected
+        if g.unlabelled:
+            acc.missing[metric] = (f"value covers labelled holdings only; {g.unlabelled_weight:.1%} of NAV has no "
+                                   f"{col}: {', '.join(g.unlabelled)}")
+        acc.out += [("concentration", f"max_{col}_weight_labelled", g.top_known, f"largest {col} among labelled holdings"),
+                    ("concentration", f"{col}_unlabelled_weight", g.unlabelled_weight, ", ".join(g.unlabelled)),
+                    ("concentration", f"max_{col}_weight_unlabelled_as_one", g.top_as_one,
+                     f"conservative: holdings without {'an' if col[0] in 'aeiou' else 'a'} {col} counted as one "
+                     "group")]
     h = metrics.hhi(pos["value"].to_numpy())
     invested = float(pos["value"].sum() / snap.nav)
     acc.out += [("portfolio", "nav", snap.nav, ""), ("portfolio", "cash", snap.cash, ""),
@@ -149,8 +195,9 @@ def _exposure(pos: pd.DataFrame, nav: float, invested: float, rets: dict, factor
             + ", ".join(sorted(exp.missing)))
     acc.out += [("portfolio", "beta", beta * covered if beta is not None else None,
                  f"Exposure Engine, {len(rets['returns'])} sessions, scaled by covered weight {covered:.3f}"),
-                ("portfolio", "volatility_ann_positions", vol * covered if vol is not None else None,
-                 "covariance of the positions, scaled to NAV"),
+                ("portfolio", "volatility_ann_covered_positions_scaled_to_nav", vol * covered if vol is not None else None,
+                 "covariance of the positions with enough returns, times their NAV weight; not the realized "
+                 "volatility of the equity curve (see the curve scopes)"),
                 ("portfolio", "effective_bets", acc.vals["effective_bets"], "eigenvalue participation ratio"),
                 ("portfolio", "missing_returns_weight", invested - covered, ", ".join(sorted(exp.missing)))]
     if exp.tilts is not None:
@@ -186,6 +233,10 @@ def _liquidity(pos: pd.DataFrame, nav: float, liq: liquidity.LiquidityParams, ac
                 ("liquidity", "max_liquidation_days", _f(pos["liquidation_days"].max()), ""),
                 ("liquidity", "cost_fallbacks", float(pos["cost_fallback"].fillna(False).sum()),
                  "positions whose cost used a fallback spread or volatility"),
+                ("liquidity", "cost_fallback_weight", float(pos.loc[pos["cost_fallback"].fillna(False).astype(bool),
+                                                                    "weight"].sum()),
+                 "NAV share whose cost estimate rests on fallback inputs; it changes the cost estimate only, which no "
+                 "limit uses (the illiquid limit needs a valid ADV, and a missing ADV is INCOMPLETE)"),
                 ("liquidity", "conditional_weight", float(pos.loc[pos["conditional"].fillna(False).astype(bool),
                                                                   "weight"].sum()),
                  "stale, no trade found, or at the floor: assumes trading resumes")]
@@ -193,26 +244,33 @@ def _liquidity(pos: pd.DataFrame, nav: float, liq: liquidity.LiquidityParams, ac
 
 
 def _drawdowns(pos: pd.DataFrame, snap: data.Snapshot, acc: _Acc) -> None:
-    """Curve metrics of every stored valuation, plus the current write-down; the limit takes the worst."""
-    worst: list[float] = []
+    """Two different things, kept apart: the worst observed drawdown of the stored curves (history), and the
+    current drawdown if stuck positions were valued at 0 (a valuation assumption). Policy v1's max_drawdown is
+    the worse of the two; v2 checks each one."""
+    hist: list[float] = []
     for name, (_dates, equity) in snap.curves.items():
         rows, dd = _curve_metrics(name, equity)
         acc.out += rows
         if dd:
-            worst.append(dd.maximum)
+            hist.append(dd.maximum)
+    acc.vals["max_drawdown_historical"] = min(hist) if hist else None
     first = next(iter(snap.curves.values()), None)
-    if first is not None and len(first[1]):
+    cur_wd = None
+    if first is not None and len(first[1]) and np.all(np.isfinite(first[1])) and np.max(first[1]) > 0:
         # no trade found, or none for more than WRITEDOWN_SESSIONS: valued at 0 (valuation rule 2026-10-09)
         down = pos["stale_sessions"].isna() | (pos["stale_sessions"] > WRITEDOWN_SESSIONS) if len(pos) else []
         nav_wd = snap.nav - (float(pos.loc[down, "value"].sum()) if len(pos) else 0.0)
         cur_wd = min(nav_wd / float(np.max(first[1])) - 1, 0.0)
-        worst.append(cur_wd)
         acc.out += [("valuation:write-down", "nav", nav_wd, f"positions without a trade for more than "
                      f"{WRITEDOWN_SESSIONS} sessions valued at 0"),
                     ("valuation:write-down", "current_drawdown", cur_wd, "against the peak of the first curve")]
-    acc.vals["max_drawdown"] = min(worst) if worst else None
-    if not worst:
-        acc.missing["max_drawdown"] = "no equity curve with 2 valid points"
+    acc.vals["current_drawdown_write_down"] = cur_wd
+    both = [x for x in (acc.vals["max_drawdown_historical"], cur_wd) if x is not None]
+    acc.vals["max_drawdown"] = min(both) if both else None
+    if not hist:
+        acc.missing["max_drawdown_historical"] = acc.missing["max_drawdown"] = "no equity curve with 2 valid points"
+    if cur_wd is None:
+        acc.missing["current_drawdown_write_down"] = "no equity curve with a positive peak"
 
 
 def period_of(day: date) -> str:

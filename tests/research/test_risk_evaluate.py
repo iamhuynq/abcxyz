@@ -210,3 +210,70 @@ def test_cash_dilutes_beta_and_volatility():
                         None, limits.DEFAULT_V1)
     beta = next(r for r in a.limit_results if r.metric == "abs_beta")
     assert beta.status == limits.PASS and beta.value == pytest.approx(0.8, rel=0.02)
+
+
+def _snap(values: dict[str, float], nav: float, curve=(1.0, 1.1, 1.0), gap=None, prices=None):
+    import pandas as pd
+    p = pd.DataFrame({"symbol": list(values), "value": list(values.values())})
+    p["price"] = [(prices or {}).get(s, 10.0) for s in values]
+    p["shares"] = p["value"] / p["price"]
+    return data.Snapshot("x", date(2023, 5, 2), nav, nav - p["value"].sum(), p,
+                         {"c": (np.arange(len(curve)), np.array(curve) * nav)}, [], gap)
+
+
+def _limits(a) -> dict:
+    return {r.metric: r for r in a.limit_results}
+
+
+def test_unclustered_holdings_are_reported_and_keep_the_limit_incomplete():
+    snap = _snap({"A": 3e8, "B": 2e8, "C": 4e8}, 1e9)
+    a = evaluate.assess(snap, _inputs(["A", "B", "C"]), _returns({"A": 1, "B": 1, "C": 1}),
+                        {"A": "c1", "B": "c2"}, None, limits.DEFAULT_V2)
+    cl = _limits(a)["max_cluster_weight"]
+    assert cl.status == limits.INCOMPLETE and cl.value == pytest.approx(0.3)
+    assert "40.0% of NAV has no cluster: C" in cl.reason
+    m = {k: v for s, k, v, _n in a.metrics if s == "concentration"}
+    assert m["cluster_unlabelled_weight"] == pytest.approx(0.4)
+    assert m["max_cluster_weight_unlabelled_as_one"] == pytest.approx(0.4)
+    assert m["max_cluster_weight_labelled"] == pytest.approx(0.3)
+
+
+def test_v2_checks_historical_and_write_down_drawdowns_separately(env):
+    with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
+        _run_id, a = evaluate.evaluate(store, data.paper_snapshot(store.con), limits.DEFAULT_V2, NOW)
+    by = _limits(a)
+    assert by["max_drawdown_historical"].value == pytest.approx(-0.2)
+    assert by["max_drawdown_historical"].status == limits.WARNING                    # -20% is the warning level
+    assert by["current_drawdown_write_down"].value == pytest.approx(0.8 / 1.25 - 1)
+    assert by["current_drawdown_write_down"].status == limits.BREACH
+    assert "max_drawdown" not in by
+
+
+def test_unvalued_positions_make_position_limits_incomplete_not_history():
+    snap = _snap({"A": 3e8, "B": 2e8}, 1e9, prices={"B": float("nan")})
+    a = evaluate.assess(snap, _inputs(["A", "B"]), _returns({"A": 1, "B": 1}), {"A": "c1", "B": "c2"}, None,
+                        limits.DEFAULT_V2)
+    by = _limits(a)
+    assert by["max_drawdown_historical"].status != limits.INCOMPLETE
+    for metric in ("max_position_weight", "max_industry_weight", "abs_beta", "illiquid_weight",
+                   "current_drawdown_write_down"):
+        assert by[metric].status == limits.INCOMPLETE and "without a valid value: B" in by[metric].reason, metric
+
+
+@pytest.mark.parametrize("gap, status", [(0.009e9, limits.PASS), (0.011e9, limits.INCOMPLETE),
+                                         (float("nan"), limits.INCOMPLETE)])
+def test_reconciliation_gap_above_one_percent_is_incomplete(gap, status):
+    snap = _snap({f"S{i}": 0.09e9 for i in range(10)}, 1e9, gap=gap)
+    a = evaluate.assess(snap, _inputs(list(snap.positions["symbol"])), _returns({s: 1 for s in snap.positions["symbol"]}),
+                        {s: f"c{i}" for i, s in enumerate(snap.positions["symbol"])}, None, limits.DEFAULT_V2)
+    assert _limits(a)["max_position_weight"].status == status
+    assert _limits(a)["max_drawdown_historical"].status != limits.INCOMPLETE
+
+
+def test_cost_fallback_weight_is_reported():
+    snap = _snap({"A": 3e8, "B": 2e8}, 1e9)
+    inputs = _inputs(["A", "B"])
+    inputs.loc[inputs["symbol"] == "B", ["half_spread", "sigma"]] = None
+    a = evaluate.assess(snap, inputs, _returns({"A": 1, "B": 1}), {"A": "c1", "B": "c2"}, None, limits.DEFAULT_V2)
+    m = {k: v for s, k, v, _n in a.metrics if s == "liquidity"}
+    assert m["cost_fallback_weight"] == pytest.approx(0.2) and m["cost_fallbacks"] == 1

@@ -237,3 +237,54 @@ Mutation check: 22 mutations covering the spec's list and more, all caught by an
 ### Open decision
 
 The cluster limit and stocks outside the cluster universe: see the reply of 2026-11-11.
+
+## PR #8 review (external, 2026-11-11, head `833e488`): assessment and plan
+
+Each point was checked against the code and the real store (read-only).
+
+| Point | Verified | Assessment | Action |
+|---|---|---|---|
+| P1 cluster maximum ignores holdings without a cluster | Yes. Paper: 7 holdings with **36.2%** of NAV have no cluster, behind a reported 29.2%. Backtest run: 10 holdings, 6.7%. | Valid. The limit was already INCOMPLETE; the reported number was misleading. | Report `unclustered_weight` and its symbols. Report a conservative value that counts the unclustered holdings as one bucket, next to the known-cluster maximum. The limit stays INCOMPLETE while any holding lacks a cluster (this answers the open question of 2026-11-11 in favour of the strict option, with the diagnostics). |
+| P1 historical max drawdown mixed with the current write-down drawdown | Yes. Backtest: historical -27.0%; current with write-down -7.9%; one metric took the worse. | Valid | New policy `default/v2` with two limits: `max_drawdown_historical` (worst stored curve; thresholds -20% / -30%) and `current_drawdown_write_down` (current NAV with stuck positions at 0, against the curve's peak; same thresholds). `default/v1` stays frozen and evaluable: its `max_drawdown` is the documented "worse of the two". `default/v2` becomes the default. |
+| P1 unvalued positions and the NAV reconciliation gap do not affect the status | Yes. A missing price gives a NaN value: `w.max()` skips it and the HHI is NaN. The reconciliation gap (0.32% on the real run) is only a note. | Valid (defensive: no real snapshot has a missing price) | Validate the snapshot before computing anything. Every position needs finite, positive shares, price and value, and the NAV and cash must be finite. A failing position is listed, and every position-based limit is INCOMPLETE; the historical drawdown stays computable. New metric `reconciliation_gap` = NAV - cash - positions. Above 1% of NAV, the position-based limits are INCOMPLETE. The paper snapshot derives cash from NAV, so its gap is 0 by construction, and the report says so. |
+| P2 VaR / ES accept non-finite returns | Yes. A NaN is counted in n but ignored in the tail; -inf gives ES = inf. | Valid defect | Any non-finite return gives VaR and ES unavailable, with the reason. Drawdown already refuses non-finite equity. Tests with NaN, +inf and -inf. |
+| P2 cost fallback does not affect the status | Yes | Valid as a definition gap | Add `cost_fallback_weight` and a count. Semantics: a fallback changes only the liquidation cost estimate, which no limit uses. The illiquid limit depends on ADV only; a missing ADV is already INCOMPLETE. The report labels the cost as "under fallback assumptions for X% of NAV". |
+| P2 industry history | The panel's ICB codes come from the current `symbol_industry` (finding E-1 of the integrity audit); there is no history. | Valid as labelling | The query takes the code as is, without the misleading `arg_max` over dates. The report and metric notes say "current classification". A change-over-time test is not possible without a history source; this is recorded. |
+| P3 volatility label | Yes | Valid | Rename to `volatility_ann_covered_positions_scaled_to_nav`, next to the coverage and the missing-returns weight. |
+| P3 VaR guidance | Partly: the tail count is in the note | Valid | The report states the tail count, and that these are historical estimates, not loss ceilings or stable forecasts, even at 500 returns. |
+
+Regression tests for each point, mutation check of each new test (`PYTHONDONTWRITEBYTECODE=1`). The real paper and
+backtest evaluations are re-run under `default/v2`. Earlier `risk` runs stay as stored.
+
+### PR #8 review fixes: result (2026-11-11)
+
+Done as planned. The full suite has 531 tests, all passing (520 before).
+
+- **Clusters.** The report has a Concentration section: the labelled maximum, the unlabelled weight with its
+  symbols, and the conservative maximum that counts the unlabelled holdings as one group. The limit reason says
+  "value covers labelled holdings only; X% of NAV has no cluster: ...".
+- **Drawdown.** Policy `default/v2` (now the default) checks `max_drawdown_historical` and
+  `current_drawdown_write_down` separately. `default/v1` is unchanged: its stored JSON is identical and it
+  stays evaluable.
+- **Snapshot validation.** A position without finite, positive shares, price and value, a cash value that is
+  not finite, or a reconciliation gap above 1% of NAV (or not finite) makes every limit that uses the positions
+  INCOMPLETE. The historical drawdown stays computable. The paper snapshot has no stored cash, and the report
+  says so.
+- **Non-finite returns.** VaR / ES and both volatilities refuse non-finite returns and give the reason.
+- **Cost fallback.** `cost_fallback_weight` is reported, with its semantics: it changes the cost estimate only.
+- **Labels.** Industry is labelled as the current classification (the misleading `arg_max` over dates is gone).
+  The volatility metric is renamed `volatility_ann_covered_positions_scaled_to_nav`, and the VaR text gives the
+  tail count and its limits.
+- **New finding, found by the v2 drawdown test.** Inclusive thresholds failed at the threshold because of float
+  rounding: 1.0 / 1.25 - 1 = -0.19999999999999996 is not <= -0.2. Comparisons now allow 1e-12 at the
+  threshold, with a test.
+- **Mutation check.** 32 mutations (22 earlier, updated, plus 10 new), all caught, run with
+  `PYTHONDONTWRITEBYTECODE=1`.
+
+Real store, policy `default/v2`:
+- Paper at 2026-11-09: INCOMPLETE. The cluster limit is INCOMPLETE with 36.2% of NAV unclustered (7 holdings);
+  the conservative cluster maximum is 36.2%, against 29.2% labelled. Beta and effective bets are INCOMPLETE
+  (CAR). Everything else passes.
+- Backtest h10 k20 renew at 2023-12-29: historical drawdown -27.0% (WARNING), current write-down drawdown
+  -7.9% (PASS). Cluster, beta, effective bets and illiquid weight are INCOMPLETE.
+- The v1 runs stay as stored.

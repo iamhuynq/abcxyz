@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 
 PASS, WARNING, BREACH, INCOMPLETE = "PASS", "WARNING", "BREACH", "INCOMPLETE"
 SEVERITY = {PASS: 0, WARNING: 1, BREACH: 2, INCOMPLETE: 3}
+EPS = 1e-12      # "at the threshold" up to float rounding: 1.0 / 1.25 - 1 is -0.19999999999999996, not -0.2
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ def check(limit: Limit, value: float | None, affected: tuple[str, ...] = (), mis
     if value is None or missing:
         why = missing or "metric not available"
         return LimitResult(limit.name, limit.metric, value, limit.warning, limit.breach, INCOMPLETE, why, affected)
-    over = (lambda t: value >= t) if limit.direction == "max" else (lambda t: value <= t)
+    over = (lambda t: value >= t - EPS) if limit.direction == "max" else (lambda t: value <= t + EPS)
     side = ">=" if limit.direction == "max" else "<="
     if over(limit.breach):
         status, reason = BREACH, f"{value:.4g} {side} breach {limit.breach:g}"
@@ -102,4 +103,17 @@ DEFAULT_V1 = Policy("default", "v1", (
     Limit("max drawdown (worse valuation)", "max_drawdown", "min", -0.20, -0.30, "monitoring level"),
 ), provisional=True, note="Provisional (2026-11-11): declared before any evaluation, not tuned on any outcome.")
 
-POLICIES = {DEFAULT_V1.key: DEFAULT_V1}
+# v2 (PR #8 review, 2026-11-11): the drawdown limit of v1 mixed the worst historical drawdown with a current,
+# hypothetical write-down drawdown. v2 checks them separately, with the same thresholds; every other limit is v1's.
+# v1 stays frozen and evaluable (its max_drawdown is the documented worse of the two).
+DEFAULT_V2 = Policy("default", "v2", DEFAULT_V1.limits[:-1] + (
+    Limit("max drawdown, historical (worst stored curve)", "max_drawdown_historical", "min", -0.20, -0.30,
+          "monitoring level; observed peak-to-trough on the stored equity curves"),
+    Limit("current drawdown with write-down", "current_drawdown_write_down", "min", -0.20, -0.30,
+          "current NAV with positions stuck for more than 60 sessions at 0, against the curve's peak (valuation "
+          "rule 2026-10-09); a valuation assumption, not an observed loss"),
+), provisional=True, note="Provisional (2026-11-11): v1 with the drawdown split into historical and current "
+                          "write-down; declared before any evaluation under it, not tuned on any outcome.")
+
+DEFAULT = DEFAULT_V2
+POLICIES = {p.key: p for p in (DEFAULT_V1, DEFAULT_V2)}

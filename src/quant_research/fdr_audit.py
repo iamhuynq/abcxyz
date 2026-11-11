@@ -72,4 +72,32 @@ def render(store: ResultsStore, now: datetime) -> str:
         flip = "yes" if q is not None and q < Q_MAX <= qb else ""
         lines.append(f"| {hid} | {fam} | {status} | {decision} | {n_runs} | {label or '-'} | {_q(q)} | {_q(qb)} | "
                      f"{flip} |")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines + _family_changes(con)) + "\n"
+
+
+def _family_changes(con) -> list[str]:
+    """Section 3: logged tests outside the family, and whether each invalidated run was re-run.
+
+    Invalidation removes a run's tests from m after its results were seen. It is acceptable only when the same
+    test was re-run (a successor: an 'ok' run with the same name, created later), so the family keeps one copy
+    of each test. A run id is `<timestamp>-<kind>-<name>-<period>`; the name is the id without the timestamp."""
+    status = con.execute("""
+        SELECT r.status, count(*), count(*) FILTER (WHERE h.p_value IS NULL OR isnan(h.p_value))
+        FROM hypothesis_log h JOIN research_runs r USING (run_id) GROUP BY 1 ORDER BY 1""").fetchall()
+    runs = con.execute("""
+        WITH r AS (SELECT run_id, status, created_at, regexp_replace(run_id, '^[0-9T]+-', '') AS name
+                   FROM research_runs),
+        t AS (SELECT run_id, count(*) AS n FROM hypothesis_log GROUP BY 1)
+        SELECT i.run_id, t.n,
+               (SELECT min(s.run_id) FROM r s WHERE s.name = i.name AND s.status = 'ok' AND s.created_at > i.created_at)
+        FROM r i JOIN t USING (run_id) WHERE i.status = 'invalid' ORDER BY 1""").fetchall()
+    missing = sum(1 for _r, _n, succ in runs if succ is None)
+    out = ["", "## 3. Logged tests outside the family", "",
+           "The family holds the tests with a p-value of runs whose status is `ok`. A NULL p-value is a test that "
+           "could not be computed (stored on record, outside the family).", "",
+           "| run status | logged tests | without p-value |", "|---|---|---|"]
+    out += [f"| {s} | {n:,} | {n_null:,} |" for s, n, n_null in status]
+    out += ["", f"Invalidated runs with logged tests: {len(runs)}; without a later `ok` run of the same name: "
+            f"{missing}.", "", "| invalidated run | tests | re-run as |", "|---|---|---|"]
+    out += [f"| {r} | {n} | {succ or 'none'} |" for r, n, succ in runs]
+    return out

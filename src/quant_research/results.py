@@ -7,6 +7,7 @@ The research database is attached READ_ONLY as `rs`.
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS hypothesis_log (
 CREATE OR REPLACE VIEW hypothesis_q AS
 WITH h AS (
     SELECT h.*, r.kind, r.pattern_name FROM hypothesis_log h JOIN research_runs r USING (run_id)
-    WHERE r.status = 'ok' AND h.p_value IS NOT NULL
+    WHERE r.status = 'ok' AND h.p_value IS NOT NULL AND NOT isnan(h.p_value)   -- NaN is not NULL in DuckDB
 ), ranked AS (
     SELECT *, row_number() OVER (ORDER BY p_value, run_id, label) AS rk, count(*) OVER () AS m FROM h
 ), adjusted AS (
@@ -252,6 +253,12 @@ class ResultsStore:
         return collect(self.con, research_code_hash(), config_json)
 
     def log_hypothesis(self, run_id: str, label: str, period: str, p_value: float | None, now: datetime) -> None:
+        """Log one test. A p-value that could not be computed (None or NaN) is stored as NULL: the test stays
+        on record but is outside the FDR family. A p-value outside [0, 1] is a bug and is refused."""
+        if p_value is not None and math.isnan(p_value):
+            p_value = None
+        if p_value is not None and not 0.0 <= p_value <= 1.0:
+            raise ValueError(f"p-value {p_value!r} of {run_id}/{label} is outside [0, 1]")
         self.con.execute("INSERT OR REPLACE INTO hypothesis_log VALUES (?, ?, ?, ?, ?)",
                          [run_id, label, period, p_value, now])
 

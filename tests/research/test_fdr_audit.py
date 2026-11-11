@@ -102,3 +102,21 @@ def test_tied_q_values_pick_one_row_deterministically(store):
     row = next(line for line in text.splitlines() if line.startswith("| P3-C1 |"))
     assert "| 2 | z | " in row
     assert "global exploratory family" in text
+
+
+def test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run(store):
+    _log(store, "20261001T100000-scan-features-research", None, [0.01, 0.2], kind="scan")
+    _log(store, "20261002T100000-scan-features-research", None, [0.02, 0.3], kind="scan")
+    _log(store, "20261001T100000-cross-h2-research", None, [0.04], kind="cross")
+    _log(store, "20261003T100000-cross-h2-research", None, [0.05], kind="cross")
+    store.con.execute("UPDATE research_runs SET created_at = created_at + INTERVAL 1 DAY "
+                      "WHERE run_id LIKE '20261002%' OR run_id LIKE '20261003%'")
+    store.con.execute("UPDATE research_runs SET status = 'invalid' WHERE run_id LIKE '20261001%'")
+    store.con.execute("UPDATE research_runs SET status = 'failed' WHERE run_id = '20261003T100000-cross-h2-research'")
+    store.con.execute("INSERT INTO hypothesis_log VALUES ('20261002T100000-scan-features-research', 'n', 'research', "
+                      "NULL, ?)", [NOW])
+    text = render(store, NOW).split("## 3.")[1]
+    assert "| invalid | 3 | 0 |" in text and "| ok | 3 | 1 |" in text and "| failed | 1 | 0 |" in text
+    assert "Invalidated runs with logged tests: 2; without a later `ok` run of the same name: 1." in text
+    assert "| 20261001T100000-scan-features-research | 2 | 20261002T100000-scan-features-research |" in text
+    assert "| 20261001T100000-cross-h2-research | 1 | none |" in text

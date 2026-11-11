@@ -136,3 +136,45 @@ Mutation check: 21 planted defects, all caught by an assertion:
   sort happened to pick the right set; the fixture now loads several physical row orders.
 
 `quant audit fdr` was re-run on the real store: `data/reports/research/audit-fdr-20261111T142439.md`.
+
+## PR #7 review (external, 2026-11-11): assessment and plan
+
+Each point was checked against the code and `results.duckdb` (read-only) before this plan.
+
+| Point | Verified | Assessment | Action |
+|---|---|---|---|
+| P1 invalidation can remove tests after results were seen | Yes. 39 invalidated runs; their re-runs went both ways. More favourable: `drop3_volume2` 0/6 -> 3/6 tests at p < 0.05 (the primary test changed from mean-vs-zero to lift), `volume_spike` 1/3 -> 3/3, `portfolio-C3` p 0.0548 -> 0.0428 (the PR #2 review valuation rule). Less favourable: `cross-h2` 2/3 -> 1/3. With the family of all 555 attempted tests (invalid runs included), BH passes 123 instead of 120 and **no BY verdict changes**. | Valid governance point; no recorded decision depends on it | 1. `quant audit fdr` section 3 adds the all-attempts family: m, the BH and BY counts, and every `ok` test whose verdict differs between the two families. 2. Per invalidated run: tests at p < 0.05, and min p, before and after its re-run. 3. A written invalidation policy (only for a defect established independently of the result; the reason names it), also in `quant runs --invalidate` help. 4. A nullable `invalidated_at` column on `research_runs`, set by new invalidations; old rows stay NULL (unknown). Actor: single-user system, not recorded. The successor stays computed by name (it does not exist yet when a run is invalidated). |
+| P2 synthetic reproducibility is not historical reproducibility | Partly. `test_provenance.py` already asserts `warehouse_sha`, `feature_build_id`, `code_hash`, `config_hash`; `env` is new and tested | Valid as a documentation boundary | State the boundary in the report. Real-data check: a provenance table in `quant audit fdr` (`ok` runs with provenance, with `env`, distinct commits), read-only |
+| P2 FDR audit fan-out | `count(DISTINCT run_id)` and `row_number()` are correct by construction; the existing fixtures do not combine every case | Defensive coverage | One fixture: a hypothesis linked through both a transition and its pattern to the same run, two runs, several labels, ties across runs and labels, and one hypothesis with no test |
+| P2 tie policy not in the pattern version | Yes. `Pattern.version` hashes the condition only. `research_code_hash` (stored with every run) did change with the fix | Valid. Changing the version hash would re-version three recorded patterns and break the frozen registry links (`registry_seed.py`) | Add `selection: "decile ties by symbol"` to provenance for new runs. Document: version = condition, code hash = implementation. Historical runs unchanged |
+| P2 cross-sectional and mid-series coverage | Yes, not covered explicitly | Coverage | Tests: (a) one symbol changed after a cutoff leaves factors and regimes unchanged before it, and changes them after; (b) a gap inside a series (the dropped zero-price row of STK) is skipped by outcome windows, which count the symbol's own sessions. Restatement variants other than a uniform rescale stay a limitation (the `adj_ratio` overlap audit is in the backlog) |
+| P3 report overstates coverage | Yes | Valid | Reword the summary as suggested |
+| P3 ISO date formats | The regex accepts `YYYY-MM-DD` with an optional `THH:MM[:SS[.f]]` and an optional `Z` or `+HH:MM` offset | Valid, documentation only | Docstring lists the accepted forms; the 2026-11-11 scan of 26,428 raw files found only these |
+
+Rollback: code, tests and docs, plus one additive nullable column. A backup
+`data/results.before-pr7-fixes.duckdb` is taken before the first open with the new schema; dropping the column
+restores the old schema. No stored row changes.
+
+### PR #7 review fixes: result (2026-11-11)
+
+All points were done as planned, with one change. `invalidated_at` is an append-only table,
+`run_invalidations (run_id, invalidated_at, reason)`, not a column. Code and tests insert into `research_runs`
+by position, so a new column would have broken them.
+
+- Backup `data/results.before-pr7-fixes.duckdb` was taken first (same SHA-256 as the live file at that moment).
+  After the change, every table has the same row count, run and hypothesis states are unchanged, and the only
+  addition is the empty `run_invalidations`.
+- `quant audit fdr` on the real store: `audit-fdr-20261111T150337.md`.
+  - All-attempts family: m = 555. BH passes 123 versus 120, and BY passes 86 versus 86. The three tests whose
+    verdict differs pass only with all attempts.
+  - Section 4: 8 of 65 family runs have provenance, and all 8 were made with uncommitted `src/` changes. This
+    is new finding H-4, informational.
+- New tests:
+  - all-attempts and before / after tables (hand-computed m = 6 case);
+  - join fan-out;
+  - invalidation record;
+  - `selection` in provenance;
+  - cross-sectional tables after a one-symbol change;
+  - a mid-series gap.
+- Mutation check: 7 more, all caught by an assertion. A first mutation for the gap test (keep the zero-price
+  row) failed the build with an error instead; it was replaced by a calendar-day outcome window.

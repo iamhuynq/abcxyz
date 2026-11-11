@@ -5,7 +5,9 @@ on 2026-11-11 (`main` at `1cf111a` plus the PR #5 review fixes). This document d
 
 ## 1. Summary
 
-The pipeline holds its main invariants, and they are now enforced by tests across every table:
+The audited invariants are covered by automated tests across the currently classified research tables,
+subject to the data and assumptions in section 6. Synthetic fixtures and finite perturbations cannot prove the
+absence of every real-world data or method bias. The invariants:
 - point in time: data after t never changes a feature, factor, regime, event or cost input at t;
 - symbol isolation: one stock's data never changes another stock's own series or outcomes;
 - chronological periods with purge masks;
@@ -177,6 +179,15 @@ A new table fails that test until it is classified.
 | created at | `research_runs.created_at` |
 | artifacts | report paths are printed by each command. Run outputs are tables keyed by `run_id`; there is no artifact table |
 | environment | `params.provenance.env`, new: Python, DuckDB, NumPy, pandas, SciPy and statsmodels versions |
+| selection rule | `params.provenance.selection`, new: implementation rules a pattern version does not hash (decile ties broken by symbol) |
+
+**Boundary.** The fixture below shows that the code paths are deterministic on fixed inputs. It does not
+re-run historical experiments on the production data; their reproducibility rests on the recorded provenance.
+`quant audit fdr` section 4 checks that provenance on the real store, read-only. On 2026-11-11 it reported:
+- of the 65 `ok` runs with tests in the family, 8 have provenance (it exists since 2026-10-08);
+- all 8 were made with uncommitted changes in `src/`, so their commit SHA alone does not identify the code
+  (H-4);
+- no run yet has `env` or `selection`.
 
 **Fixture experiment** (`tests/research/test_reproducibility.py`, `uv run pytest
 tests/research/test_reproducibility.py -q`):
@@ -227,20 +238,34 @@ Regression test: test_fdr_family.py (NaN, direct NaN, out-of-range, bounds, re-l
 ID: G-2
 Title: Invalidation removes tests from the family after their results were seen
 Severity: Informational
-Status: Accepted limitation (now reported)
-Evidence: 41 invalid runs; 39 hold 260 logged tests. Every one has a later `ok` run of the same name; every
-  invalidation has a written reason, and all are code or method fixes. One of them changed the definition of
-  the primary pattern test (mean versus zero to lift versus universe, 2026-10-04), in the research period and
-  before any pre-registration.
+Status: Accepted limitation (policy written, history and sensitivity reported; PR #7 review P1)
+Evidence: 41 invalid runs; 39 hold 260 logged tests.
+  - Every one has a later `ok` run of the same name. Every invalidation has a written reason, and all are
+    code or method fixes.
+  - One of them changed the definition of the primary pattern test (mean versus zero to lift versus universe,
+    2026-10-04), in the research period and before any pre-registration.
+  - A successor does not prove the invalidation was independent of the result. The re-runs went both ways:
+    more favourable for drop3_volume2 (0 -> 3 of 6 tests at p < 0.05), volume_spike (1 -> 3 of 3) and
+    portfolio-C3 (p 0.0548 -> 0.0428, the PR #2 review valuation rule); less favourable for cross-h2 (2 -> 1
+    of 3).
+  - With the family of all 555 attempted tests (invalid runs included), BH passes 123 tests of `ok` runs
+    instead of 120, and BY passes 86 in both. Leaving invalid runs out did not make any test pass: the three
+    tests whose BH verdict differs pass only with all attempts. No BY verdict and no registry decision changes.
 Affected components: ResultsStore.invalidate, hypothesis_q.
-Potential impact: the family keeps one copy of each test, which is the intended count. A re-run made because a
-  first result looked wrong is a fork in the analysis that the family does not price; the recorded reasons and
-  the result docs are the control.
-Reproduction or verification steps: `uv run quant audit fdr`, section 3 (audit-fdr-20261111T142439.md: 39
-  runs, 0 without a re-run).
-Remediation: section 3 of the FDR report lists every invalid run with tests and its re-run, and flags runs
-  without one.
-Regression test: test_fdr_audit.py::test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run
+Potential impact: a re-run made because a first result looked wrong would be a fork in the analysis that the
+  operational family does not price. The policy, the recorded reasons, the all-attempts comparison and the
+  before / after table are the controls.
+Reproduction or verification steps: `uv run quant audit fdr`, section 3 (audit-fdr-20261111T150337.md).
+Remediation:
+  - Policy (results.py docstring, `quant runs --invalidate` help): invalidate only for a defect established
+    independently of the result, named in the reason, never because a result is unwelcome.
+  - Every invalidation from 2026-11-11 on is also written to the append-only table `run_invalidations`, with
+    its time and reason. Earlier ones have no time. The actor is not recorded (single-user system). The
+    successor is found by run name, because it does not exist yet when a run is invalidated.
+  - FDR report section 3: the all-attempts family next to the operational one, the tests whose verdict
+    differs, and each invalidated run's tests at p < 0.05 and min p, before and after its re-run.
+Regression test: test_fdr_audit.py::test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run,
+  test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests
 ```
 
 ```text
@@ -281,11 +306,29 @@ Remediation: `, symbol` added to both ORDER BY clauses. Verified on the real dat
   - momentum10_d10 moves by 70 / 10 / 2 rows (research / validation / holdout; symmetric difference with one
     earlier draw) and is now the same on every run.
   Recorded momentum10_d10 runs keep their stored numbers. A re-run would differ in the fifth decimal of the
-  lift. Pattern versions are unchanged: the version hashes the condition, and the tie order was never part of
-  it.
+  lift.
+  Versioning (PR #7 review): `pattern_definitions.version` identifies the condition, and the stored
+  `code_hash` identifies the implementation (it changed with this fix). Putting the tie rule into the version
+  hash would re-version three recorded patterns and break the frozen registry links. Instead, new runs record
+  `selection: "decile ties broken by symbol"` in their provenance.
 Regression test: test_reproducibility.py::test_decile_patterns_break_ties_by_symbol and
   ::test_backtest_signal_decile_breaks_ties_by_symbol (a tie straddles the decile boundary, under four physical
   row orders; without the tie-break, hash order picks another set).
+```
+
+```text
+ID: H-4
+Title: Runs with provenance were made with uncommitted code
+Severity: Informational
+Status: Accepted limitation (reported)
+Evidence: `quant audit fdr` section 4, real store: 8 of the 65 `ok` runs in the family have provenance, and
+  all 8 have git_dirty = true. 57 older runs predate provenance (2026-10-08).
+Affected components: provenance.collect (git_sha, git_dirty, code_hash).
+Potential impact: the commit SHA alone does not identify the code of those runs. `code_hash` (a hash of every
+  research .py and .sql file) does, but the files behind a given hash are not stored.
+Reproduction or verification steps: `uv run quant audit fdr`, section 4.
+Remediation: none for past runs. Practice: commit before a recorded research run. The report shows the count.
+Regression test: test_fdr_audit.py (section 4 table).
 ```
 
 ```text
@@ -379,17 +422,22 @@ Regression test: test_events.py (each event equals its condition; point in time)
 | `test_outcome_masks.py::test_pattern_lift_compares_the_same_rows_on_both_sides` | The lift's denominators match in both mask modes (F-1) |
 | `test_fdr_family.py` | Family membership and p-value edge cases: NaN, NULL, out of range, re-log, ties, m = 1, run status, trace (G-1) |
 | `test_fdr_audit.py::test_report_lists_tests_outside_the_family_*` | Every invalid run is listed with its re-run (G-2) |
-| `test_reproducibility.py` | Two builds and two experiments agree under the stated policy; provenance has the environment; decile ties are broken by symbol (H-1, H-2, H-3) |
+| `test_reproducibility.py` | Two builds and two experiments agree under the stated policy; provenance has the environment and the selection rule; decile ties are broken by symbol (H-1, H-2, H-3) |
+| `test_integrity.py::test_one_symbol_after_a_cutoff_moves_cross_sections_only_from_then_on` | Cross-sectional tables (factors, regimes) may move on the same dates as a change, never on earlier ones |
+| `test_integrity.py::test_outcome_windows_skip_a_missing_session_inside_a_series` | A gap inside a series is skipped: windows count the symbol's own sessions |
+| `test_fdr_audit.py::test_hypothesis_rows_survive_join_fan_out` | One row per hypothesis, distinct run count and a fixed pick when links, labels and ties multiply |
+| `test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests` | An invalidation keeps the run's tests and records its time and reason |
 | Existing: `test_feature_build.py`, `test_factors.py`, `test_regimes.py`, `test_events.py`, `test_costs.py`, `test_cross.py`, `test_groups.py`, `tests/backtest/*` | Independent reference implementations and per-table look-ahead tests |
 
-Every new test was mutation-checked: 21 planted defects, all caught by an assertion, not by an error.
+Every new test was mutation-checked: 28 planted defects, all caught by an assertion, not by an error.
 
 ## 6. Known limitations
 
 - No historical exchange, industry, index membership or ticker changes (E-1).
 - No publication timestamps for reports or fundamentals, so they are not used in features. Fundamentals work
   was stopped on 2026-10-08.
-- Adjusted prices come from the vendor. A restatement before our first fetch cannot be seen. A wrong
+- Adjusted prices come from the vendor. A restatement before our first fetch cannot be seen. The tests cover
+  a uniform rescale of `adj_ratio`, not every possible vendor correction. A wrong
   `adj_ratio` would distort returns; the `adj_ratio` overlap audit is in the backlog.
 - Limit bands and tick sizes are approximate (current exchange; no historical band changes).
 - Predictive labels are gross. Tradability depends on cost model v1, which has no history of exchange bands or

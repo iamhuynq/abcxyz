@@ -75,29 +75,82 @@ def render(store: ResultsStore, now: datetime) -> str:
     return "\n".join(lines + _family_changes(con)) + "\n"
 
 
-def _family_changes(con) -> list[str]:
-    """Section 3: logged tests outside the family, and whether each invalidated run was re-run.
+ALL_ATTEMPTS_SQL = """
+    -- BH and BY over every logged test with a p-value, whatever the run status (invalid runs included)
+    WITH h AS (SELECT run_id, label, p_value FROM hypothesis_log WHERE p_value IS NOT NULL AND NOT isnan(p_value)),
+    ranked AS (SELECT *, row_number() OVER (ORDER BY p_value, run_id, label) AS rk, count(*) OVER () AS m FROM h),
+    adjusted AS (SELECT *, min(p_value * m / rk) OVER (ORDER BY rk DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                           AS bh, sum(1.0 / rk) OVER () AS c_m FROM ranked)
+    SELECT run_id, label, m, least(1.0, bh) AS q_all, least(1.0, bh * c_m) AS q_by_all FROM adjusted"""
 
-    Invalidation removes a run's tests from m after its results were seen. It is acceptable only when the same
-    test was re-run (a successor: an 'ok' run with the same name, created later), so the family keeps one copy
-    of each test. A run id is `<timestamp>-<kind>-<name>-<period>`; the name is the id without the timestamp."""
+
+def _family_changes(con) -> list[str]:
+    """Section 3: logged tests outside the family, the family of all attempts, and each invalidated run's re-run.
+
+    Invalidation removes a run's tests from m after its results were seen. It is acceptable only for a defect
+    found independently of the result, and when the same test was re-run (a successor: an 'ok' run with the same
+    name, created later), so the family keeps one copy of each test. The all-attempts family shows whether any
+    verdict depends on leaving invalid runs out. A run id is `<timestamp>-<kind>-<name>-<period>`; the name is the
+    id without the timestamp."""
     status = con.execute("""
         SELECT r.status, count(*), count(*) FILTER (WHERE h.p_value IS NULL OR isnan(h.p_value))
         FROM hypothesis_log h JOIN research_runs r USING (run_id) GROUP BY 1 ORDER BY 1""").fetchall()
-    runs = con.execute("""
+    m_all, = con.execute(f"SELECT coalesce(max(m), 0) FROM ({ALL_ATTEMPTS_SQL})").fetchone()
+    counts = con.execute(f"""
+        SELECT count(*) FILTER (WHERE q.q_value < {Q_MAX}), count(*) FILTER (WHERE a.q_all < {Q_MAX}),
+               count(*) FILTER (WHERE q.q_by < {Q_MAX}), count(*) FILTER (WHERE a.q_by_all < {Q_MAX})
+        FROM hypothesis_q q JOIN ({ALL_ATTEMPTS_SQL}) a USING (run_id, label)""").fetchone()
+    flips = con.execute(f"""
+        SELECT q.run_id, q.label, q.q_value, a.q_all, q.q_by, a.q_by_all
+        FROM hypothesis_q q JOIN ({ALL_ATTEMPTS_SQL}) a USING (run_id, label)
+        WHERE (q.q_value < {Q_MAX}) <> (a.q_all < {Q_MAX}) OR (q.q_by < {Q_MAX}) <> (a.q_by_all < {Q_MAX})
+        ORDER BY q.q_value, q.run_id, q.label""").fetchall()
+    runs = con.execute(f"""
         WITH r AS (SELECT run_id, status, created_at, regexp_replace(run_id, '^[0-9T]+-', '') AS name
                    FROM research_runs),
-        t AS (SELECT run_id, count(*) AS n FROM hypothesis_log GROUP BY 1)
-        SELECT i.run_id, t.n,
-               (SELECT min(s.run_id) FROM r s WHERE s.name = i.name AND s.status = 'ok' AND s.created_at > i.created_at)
-        FROM r i JOIN t USING (run_id) WHERE i.status = 'invalid' ORDER BY 1""").fetchall()
-    missing = sum(1 for _r, _n, succ in runs if succ is None)
+        t AS (SELECT run_id, count(*) AS n, count(*) FILTER (WHERE p_value < {Q_MAX}) AS n_sig, min(p_value) AS min_p
+              FROM hypothesis_log GROUP BY 1),
+        i AS (SELECT i.run_id, t.n, t.n_sig, t.min_p,
+                     (SELECT min(s.run_id) FROM r s WHERE s.name = i.name AND s.status = 'ok'
+                      AND s.created_at > i.created_at) AS succ
+              FROM r i JOIN t USING (run_id) WHERE i.status = 'invalid')
+        SELECT i.run_id, i.n, i.n_sig, i.min_p, i.succ, s.n_sig, s.min_p
+        FROM i LEFT JOIN t s ON s.run_id = i.succ ORDER BY 1""").fetchall()
+    missing = sum(1 for row in runs if row[4] is None)
     out = ["", "## 3. Logged tests outside the family", "",
            "The family holds the tests with a p-value of runs whose status is `ok`. A NULL p-value is a test that "
-           "could not be computed (stored on record, outside the family).", "",
+           "could not be computed (stored on record, outside the family). A run is invalidated only for a defect "
+           "found independently of its result; the re-run columns below show which way each re-run went.", "",
            "| run status | logged tests | without p-value |", "|---|---|---|"]
     out += [f"| {s} | {n:,} | {n_null:,} |" for s, n, n_null in status]
+    out += ["", f"All-attempts family (every logged test with a p-value, invalid runs included): m = {m_all:,}. "
+            f"Tests of `ok` runs passing at {Q_MAX}: BH {counts[0]:,} in the family, {counts[1]:,} with all attempts; "
+            f"BY {counts[2]:,} and {counts[3]:,}. Tests whose verdict differs between the two: {len(flips)}."]
+    if flips:
+        out += ["", "| run | label | q BH | q BH all | q BY | q BY all |", "|---|---|---|---|---|---|"]
+        out += [f"| {r} | {lab} | {_q(q)} | {_q(qa)} | {_q(qb)} | {_q(qba)} |" for r, lab, q, qa, qb, qba in flips]
     out += ["", f"Invalidated runs with logged tests: {len(runs)}; without a later `ok` run of the same name: "
-            f"{missing}.", "", "| invalidated run | tests | re-run as |", "|---|---|---|"]
-    out += [f"| {r} | {n} | {succ or 'none'} |" for r, n, succ in runs]
-    return out
+            f"{missing}.", "",
+            f"| invalidated run | tests | p < {Q_MAX} | min p | re-run as | re-run p < {Q_MAX} | re-run min p |",
+            "|---|---|---|---|---|---|---|"]
+    out += [f"| {r} | {n} | {k} | {_q(mp)} | {succ or 'none'} | {'-' if k2 is None else k2} | {_q(mp2)} |"
+            for r, n, k, mp, succ, k2, mp2 in runs]
+    return out + _provenance(con)
+
+
+def _provenance(con) -> list[str]:
+    """Section 4: what the family's runs recorded about how they were produced (read-only)."""
+    row = con.execute("""
+        WITH r AS (SELECT run_id, try_cast(params AS JSON) -> 'provenance' AS p FROM research_runs
+                   WHERE status = 'ok' AND run_id IN (SELECT DISTINCT run_id FROM hypothesis_q))
+        SELECT count(*), count(p), count(p ->> 'warehouse_sha'), count(p ->> 'config_hash'), count(p ->> 'env'),
+               count(p ->> 'selection'), count(DISTINCT p ->> 'git_sha'),
+               count(*) FILTER (WHERE (p ->> 'git_dirty') = 'true')
+        FROM r""").fetchone()
+    n, prov, wh, cfg, env, sel, commits, dirty = row
+    return ["", "## 4. Provenance of the family's runs", "",
+            "Recorded with each `ok` run that has tests in the family. Runs made before a field existed do not have "
+            "it; nothing is filled in afterwards. This table checks what was recorded; it does not re-run anything.",
+            "", "| runs | with provenance | warehouse hash | config hash | environment | selection rule | "
+            "distinct commits | uncommitted changes |", "|---|---|---|---|---|---|---|---|",
+            f"| {n} | {prov} | {wh} | {cfg} | {env} | {sel} | {commits} | {dirty} |"]

@@ -25,7 +25,7 @@ import pandas as pd
 from quant_research.build import build
 from quant_research.engine import run_pattern, run_scan
 from quant_research.patterns import Pattern
-from quant_research.provenance import collect, environment
+from quant_research.provenance import SELECTION, collect, environment
 from quant_research.results import ResearchParams, ResultsStore, research_code_hash
 from tests.research.synthetic import build_synthetic_warehouse
 from tests.research.synthetic_research import build_research_db
@@ -90,7 +90,7 @@ def test_provenance_records_the_environment(tmp_path):
     build_research_db(research)
     with ResultsStore(tmp_path / "results.duckdb", research) as store:
         p = collect(store.con, research_code_hash())
-    assert p["env"] == environment()
+    assert p["env"] == environment() and p["selection"] == SELECTION == "decile ties broken by symbol"
     assert environment().startswith("python 3.") and "duckdb " in environment() and "numpy " in environment()
 
 

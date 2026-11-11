@@ -117,6 +117,30 @@ def test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run(sto
                       "NULL, ?)", [NOW])
     text = render(store, NOW).split("## 3.")[1]
     assert "| invalid | 3 | 0 |" in text and "| ok | 3 | 1 |" in text and "| failed | 1 | 0 |" in text
+    # family: p 0.02, 0.3 (m = 2) -> BH q 0.04 passes; all attempts: 0.01, 0.02, 0.04, 0.05, 0.2, 0.3 (m = 6)
+    # -> BH q of 0.02 = min(0.06, 0.075, ...) = 0.06 fails; BY fails in both (0.06 and 0.147)
+    assert ("All-attempts family (every logged test with a p-value, invalid runs included): m = 6. Tests of `ok` "
+            "runs passing at 0.05: BH 1 in the family, 0 with all attempts; BY 0 and 0. Tests whose verdict differs "
+            "between the two: 1.") in text
+    assert "| 20261002T100000-scan-features-research | t0 | 0.04 | 0.06 | 0.06 | 0.147 |" in text
     assert "Invalidated runs with logged tests: 2; without a later `ok` run of the same name: 1." in text
-    assert "| 20261001T100000-scan-features-research | 2 | 20261002T100000-scan-features-research |" in text
-    assert "| 20261001T100000-cross-h2-research | 1 | none |" in text
+    assert ("| 20261001T100000-scan-features-research | 2 | 1 | 0.01 | 20261002T100000-scan-features-research | 1 | "
+            "0.02 |") in text
+    assert "| 20261001T100000-cross-h2-research | 1 | 1 | 0.04 | none | - | - |" in text
+    assert "| 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |" in text.split("## 4.")[1]     # the ok run stored no provenance
+
+
+def test_hypothesis_rows_survive_join_fan_out(store):
+    """P3-C1 links run X1 through a transition and runs X1, X2 through its pattern; each run has several labels;
+    the smallest q is tied across runs and labels. One row per hypothesis, the right run count, a fixed pick."""
+    p = store.con.execute("SELECT pattern FROM hypothesis_status WHERE hypothesis_id = 'P3-C1'").fetchone()[0]
+    assert p
+    _log(store, "X2", p, [0.01, 0.01, 0.5], kind="cross", labels=["b", "a", "c"])
+    _log(store, "X1", p, [0.01, 0.7], kind="cross", labels=["z", "y"])
+    store.con.execute("UPDATE hypothesis_transitions SET run_id = 'X1' WHERE hypothesis_id = 'P3-C1' AND seq = "
+                      "(SELECT min(seq) FROM hypothesis_transitions WHERE hypothesis_id = 'P3-C1')")
+    text = render(store, NOW).split("## 2.")[1].split("## 3.")[0]
+    rows = [line for line in text.splitlines() if line.startswith("| P3-C1 |")]
+    assert len(rows) == 1 and "| 2 | z |" in rows[0]                 # 2 distinct runs; tie -> run X1, then label
+    none = [line for line in text.splitlines() if line.startswith("| P3-C2 |")]
+    assert len(none) == 1 and none[0].endswith("| 0 | - | - | - |  |")

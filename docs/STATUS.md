@@ -167,6 +167,16 @@ Registry). Summary:
     The order_imbalance selections and the frozen strategy's data are identical to before. `momentum10_d10`
     (P3-C2, failed) is now deterministic; it varied by 74 rows between runs;
   - 476 tests pass; 21 mutations, all caught; `results.duckdb` and the registry are unchanged.
+  - Pushed as PR #7. Review fixes (ChatGPT review, 2026-11-11), same branch:
+    - invalidation policy, and the append-only `run_invalidations` table (backup
+      `data/results.before-pr7-fixes.duckdb`);
+    - `quant audit fdr` compares the family with all 555 attempts (no BY verdict changes; BH 120 vs 123), shows
+      each invalid run's re-run before and after, and has a provenance table. Only 8 of 65 family runs have
+      provenance, all made with uncommitted code (H-4);
+    - `selection` in provenance;
+    - tests for join fan-out, cross-sectional tables and a mid-series gap;
+    - report wording qualified; accepted date formats documented;
+    - 480 tests pass; 28 mutations in all, every one caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

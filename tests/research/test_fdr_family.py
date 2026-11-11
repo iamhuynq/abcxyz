@@ -114,3 +114,13 @@ def test_every_q_row_traces_to_one_logged_test_and_one_run(store):
         LEFT JOIN hypothesis_log h USING (run_id, label) LEFT JOIN research_runs r USING (run_id)
         WHERE h.p_value IS DISTINCT FROM q.p_value OR r.status IS DISTINCT FROM 'ok' OR h.period <> q.period""").fetchone()[0]
     assert orphans == 0 and store.con.execute("SELECT count(*) FROM hypothesis_q").fetchone()[0] == 5
+
+
+def test_invalidation_records_when_and_why_and_keeps_the_tests(store):
+    _run(store, "R")
+    store.log_hypothesis("R", "x", "research", 0.01, NOW)
+    assert store.invalidate("R", "code defect: wrong join", NOW) == 1
+    assert store.invalidate("missing", "nothing", NOW) == 0
+    assert store.con.execute("SELECT * FROM run_invalidations").fetchall() == [("R", NOW, "code defect: wrong join")]
+    assert store.con.execute("SELECT count(*) FROM hypothesis_log WHERE run_id = 'R'").fetchone()[0] == 1
+    assert _q(store) == {}

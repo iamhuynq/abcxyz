@@ -2,7 +2,8 @@
 
 A run is traceable to: git commit (+ whether src/ had uncommitted changes), dataset (warehouse file hash
 recorded by `quant build`), feature build, code hash, the hash of the run configuration and, from 2026-11-11, the
-Python and numerical library versions (`env`). Older runs have no `env`; readers use `.get`.
+Python and numerical library versions (`env`) and the selection rule that pattern versions do not hash
+(`selection`). Older runs have neither; readers use `.get`.
 """
 
 import hashlib
@@ -29,6 +30,8 @@ def git_info() -> tuple[str, bool | None]:
         return "unknown", None
 
 
+# Implementation rules that a pattern version (a hash of the condition) does not capture. Change with the code.
+SELECTION = "decile ties broken by symbol"      # patterns.py and backtest/data.py, from 2026-11-11 (H-2)
 ENV_PACKAGES = ("duckdb", "numpy", "pandas", "scipy", "statsmodels")
 
 
@@ -62,7 +65,8 @@ def collect(con, research_code_hash: str, config_json: str | None = None) -> dic
         build_id = row[0] if row else None
     out = {"git_sha": sha, "git_dirty": dirty, "warehouse_sha": warehouse_sha, "feature_build_id": build_id,
            "code_hash": research_code_hash,      # key kept for older runs: it is the research_code_hash
-           "env": environment()}
+           "env": environment(),
+           "selection": SELECTION}
     if config_json is not None:
         out["config_hash"] = config_hash(config_json)
     return out

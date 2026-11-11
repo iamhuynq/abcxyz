@@ -181,3 +181,38 @@ def test_built_periods_follow_the_boundaries(tmp_path):
                                    "holdout" if d <= BOUNDARIES[2] else "forward")
     assert (p["period"] == expect).all()
     assert set(p["period"]) == {"research", "validation"}
+
+
+def test_one_symbol_after_a_cutoff_moves_cross_sections_only_from_then_on(base, tmp_path):
+    """Factors and regimes are cross-sectional: a change to one symbol may move every symbol on the same dates,
+    never on earlier ones."""
+    cut = calendar()[180]
+    changed = _variant(base[0], tmp_path, """
+        UPDATE quotes_daily SET price_open = price_open * 1.5, price_high = price_high * 1.5,
+            price_low = price_low * 1.5, price_close = price_close * 1.5, deal_volume = deal_volume * 4,
+            total_value = total_value * 6
+        WHERE symbol = 'UPC' AND date > ?""", [cut])
+    for table in ("stock_factors", "market_regimes"):
+        pd.testing.assert_frame_equal(_table(base[1], table, "date <= ?", [cut]),
+                                      _table(changed, table, "date <= ?", [cut]), obj=table)
+    after = "date > ? AND symbol <> 'UPC'"
+    assert not _table(base[1], "stock_factors", after, [cut]).equals(_table(changed, "stock_factors", after, [cut]))
+    assert not _table(base[1], "market_regimes", "date > ?", [cut]).equals(
+        _table(changed, "market_regimes", "date > ?", [cut]))
+
+
+def test_outcome_windows_skip_a_missing_session_inside_a_series(base):
+    """STK's zero-price placeholder row is dropped from the panel: windows count the symbol's own sessions, so
+    the session before the gap reaches over it."""
+    from tests.research.synthetic import ZERO_PRICE_INDEX
+    days = calendar()
+    before, gap, after = days[ZERO_PRICE_INDEX - 1], days[ZERO_PRICE_INDEX], days[ZERO_PRICE_INDEX + 1]
+    panel = _table(base[1], "daily_panel", "symbol = 'STK'").set_index("date")
+    assert pd.Timestamp(gap) not in panel.index
+    close = panel["adj_close"]
+    t = _table(base[1], "stock_targets", "symbol = 'STK'").set_index("date")
+    expect = close[pd.Timestamp(after)] / close[pd.Timestamp(before)] - 1
+    assert t.loc[pd.Timestamp(before), "fwd_ret_close_1d"] == pytest.approx(expect, rel=1e-12)
+    i = list(close.index).index(pd.Timestamp(before))
+    assert t.loc[pd.Timestamp(before), "fwd_ret_close_5d"] == pytest.approx(close.iloc[i + 5] / close.iloc[i] - 1,
+                                                                            rel=1e-12)

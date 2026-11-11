@@ -371,8 +371,9 @@ def main(argv: list[str] | None = None) -> int:
     dl = sub.add_parser("daily", help="Scan new sessions, update the paper portfolio, write the daily report")
     dl.add_argument("--date", help="Re-scan one session (YYYY-MM-DD)")
     runs = sub.add_parser("runs", help="List runs, or invalidate one (kept in the log)")
-    runs.add_argument("--invalidate")
-    runs.add_argument("--reason")
+    runs.add_argument("--invalidate", help="Run id. Only for a defect found independently of the result (code, data "
+                                           "or method error), never because a result is unwelcome")
+    runs.add_argument("--reason", help="The defect, named (required with --invalidate)")
     ev = sub.add_parser("events", help="Event catalog (Phase 5)")
     ev.add_argument("events_command", choices=("study",), help="study: descriptive event study, research period")
     pf = sub.add_parser("portfolio", help="Portfolio construction grid (research period, one logged test per config)")

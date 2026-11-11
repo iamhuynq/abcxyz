@@ -7,6 +7,7 @@ passes BH but not BY is "not robust to arbitrary dependence"; any state change g
 `quant registry move`.
 """
 
+import json
 from datetime import datetime
 
 from quant_research import provenance
@@ -72,4 +73,134 @@ def render(store: ResultsStore, now: datetime) -> str:
         flip = "yes" if q is not None and q < Q_MAX <= qb else ""
         lines.append(f"| {hid} | {fam} | {status} | {decision} | {n_runs} | {label or '-'} | {_q(q)} | {_q(qb)} | "
                      f"{flip} |")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines + _family_changes(con)) + "\n"
+
+
+ALL_ATTEMPTS_SQL = """
+    -- BH and BY over every logged test with a p-value, whatever the run status (invalid runs included)
+    WITH h AS (SELECT run_id, label, p_value FROM hypothesis_log WHERE p_value IS NOT NULL AND NOT isnan(p_value)),
+    ranked AS (SELECT *, row_number() OVER (ORDER BY p_value, run_id, label) AS rk, count(*) OVER () AS m FROM h),
+    adjusted AS (SELECT *, min(p_value * m / rk) OVER (ORDER BY rk DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                           AS bh, sum(1.0 / rk) OVER () AS c_m FROM ranked)
+    SELECT run_id, label, m, least(1.0, bh) AS q_all, least(1.0, bh * c_m) AS q_by_all FROM adjusted"""
+
+
+def _family_changes(con) -> list[str]:
+    """Section 3: logged tests outside the family, the family of all attempts, and each invalidated run's re-run.
+
+    Invalidation removes a run's tests from m after its results were seen. It is acceptable only for a defect
+    found independently of the result, and when the same test was re-run (a successor: a later 'ok' run of the
+    same experiment, see _reruns), so the family keeps one copy of each test. The all-attempts family shows whether any
+    verdict depends on leaving invalid runs out. A run id is `<timestamp>-<kind>-<name>-<period>`; the name is the
+    id without the timestamp."""
+    status = con.execute("""
+        SELECT r.status, count(*), count(*) FILTER (WHERE h.p_value IS NULL OR isnan(h.p_value))
+        FROM hypothesis_log h JOIN research_runs r USING (run_id) GROUP BY 1 ORDER BY 1""").fetchall()
+    m_all, = con.execute(f"SELECT coalesce(max(m), 0) FROM ({ALL_ATTEMPTS_SQL})").fetchone()
+    counts = con.execute(f"""
+        SELECT count(*) FILTER (WHERE q.q_value < {Q_MAX}), count(*) FILTER (WHERE a.q_all < {Q_MAX}),
+               count(*) FILTER (WHERE q.q_by < {Q_MAX}), count(*) FILTER (WHERE a.q_by_all < {Q_MAX})
+        FROM hypothesis_q q JOIN ({ALL_ATTEMPTS_SQL}) a USING (run_id, label)""").fetchone()
+    flips = con.execute(f"""
+        SELECT q.run_id, q.label, q.q_value, a.q_all, q.q_by, a.q_by_all
+        FROM hypothesis_q q JOIN ({ALL_ATTEMPTS_SQL}) a USING (run_id, label)
+        WHERE (q.q_value < {Q_MAX}) <> (a.q_all < {Q_MAX}) OR (q.q_by < {Q_MAX}) <> (a.q_by_all < {Q_MAX})
+        ORDER BY q.q_value, q.run_id, q.label""").fetchall()
+    runs = _reruns(con)
+    missing = sum(1 for row in runs if row[5] != SAME)
+    out = ["", "## 3. Logged tests outside the family", "",
+           "The family holds the tests with a p-value of runs whose status is `ok`. A NULL p-value is a test that "
+           "could not be computed (stored on record, outside the family). A run is invalidated only for a defect "
+           "found independently of its result; the re-run columns below show which way each re-run went.", "",
+           "| run status | logged tests | without p-value |", "|---|---|---|"]
+    out += [f"| {s} | {n:,} | {n_null:,} |" for s, n, n_null in status]
+    out += ["", f"All-attempts family (every logged test with a p-value, invalid runs included): m = {m_all:,}. "
+            f"Tests of `ok` runs passing at {Q_MAX}: BH {counts[0]:,} in the family, {counts[1]:,} with all attempts; "
+            f"BY {counts[2]:,} and {counts[3]:,}. Tests whose verdict differs between the two: {len(flips)}."]
+    if flips:
+        out += ["", "| run | label | q BH | q BH all | q BY | q BY all |", "|---|---|---|---|---|---|"]
+        out += [f"| {r} | {lab} | {_q(q)} | {_q(qa)} | {_q(qb)} | {_q(qba)} |" for r, lab, q, qa, qb, qba in flips]
+    out += ["", f"Invalidated runs with logged tests: {len(runs)}; without a later `ok` run of the same experiment: "
+            f"{missing}. The same experiment: same kind, pattern, period, pattern version and stored parameters; "
+            "provenance and data or code identifiers (`*_build_id`, `*_code_hash`) may differ, since a re-run after a "
+            "fix uses new code or a rebuilt input. Without one, the table shows the earliest later `ok` run of the "
+            "same name and what differs.", "",
+            f"| invalidated run | tests | p < {Q_MAX} | min p | re-run as | match | re-run p < {Q_MAX} | re-run min p |",
+            "|---|---|---|---|---|---|---|---|"]
+    out += [f"| {r} | {n} | {k} | {_q(mp)} | {succ or 'none'} | {match} | {'-' if k2 is None else k2} | {_q(mp2)} |"
+            for r, n, k, mp, succ, match, k2, mp2 in runs]
+    return out + _provenance(con)
+
+
+SAME = "same experiment"
+
+
+def _config(params: str) -> str:
+    """Stored parameters that define the experiment: provenance and data or code identifiers removed."""
+    def clean(x):
+        if isinstance(x, dict):
+            return {k: clean(v) for k, v in x.items() if not k.endswith(("_build_id", "_code_hash"))}
+        return [clean(v) for v in x] if isinstance(x, list) else x
+    d = json.loads(params)
+    d.pop("provenance", None)
+    return json.dumps(clean(d), sort_keys=True, default=str)
+
+
+def _identity(run: dict) -> tuple:
+    return run["kind"], run["pattern"], run["period"], run["version"], run["config"]
+
+
+def _differences(a: dict, b: dict) -> str:
+    parts = []
+    if (a["kind"], a["pattern"], a["period"]) != (b["kind"], b["pattern"], b["period"]):
+        parts.append("kind, pattern or period differ")
+    if a["version"] != b["version"]:
+        parts.append("definition changed: version")
+    if a["config"] != b["config"]:
+        ca, cb = json.loads(a["config"]), json.loads(b["config"])
+        parts.append("parameters differ: " + ", ".join(sorted(k for k in set(ca) | set(cb) if ca.get(k) != cb.get(k))))
+    return "; ".join(parts)
+
+
+def _reruns(con) -> list[tuple]:
+    """(invalid run, tests, tests at p < Q_MAX, min p, re-run, match, its tests at p < Q_MAX, its min p) for every
+    invalidated run with logged tests. The re-run is the earliest later `ok` run of the same experiment, else the
+    earliest later `ok` run of the same name with what differs."""
+    runs = {}
+    for rid, status, created, kind, pattern, version, period, params, name in con.execute("""
+            SELECT run_id, status, created_at, kind, pattern_name, pattern_version, period, params,
+                   regexp_replace(run_id, '^[0-9T]+-', '') FROM research_runs""").fetchall():
+        runs[rid] = {"run_id": rid, "status": status, "created": created, "kind": kind, "pattern": pattern,
+                     "version": version, "period": period, "config": _config(params), "name": name}
+    stats = {rid: (n, k, mp) for rid, n, k, mp in con.execute(f"""
+        SELECT run_id, count(*), count(*) FILTER (WHERE p_value < {Q_MAX}), min(p_value)
+        FROM hypothesis_log GROUP BY 1""").fetchall()}
+    out = []
+    for rid in sorted(r for r, v in runs.items() if v["status"] == "invalid" and r in stats):
+        inv = runs[rid]
+        later = sorted((v for v in runs.values() if v["status"] == "ok" and v["name"] == inv["name"]
+                        and v["created"] > inv["created"]), key=lambda v: (v["created"], v["run_id"]))
+        same = [v for v in later if _identity(v) == _identity(inv)]
+        succ = same[0] if same else (later[0] if later else None)
+        match = SAME if same else (_differences(inv, succ) if succ else "-")
+        k2, mp2 = (stats.get(succ["run_id"], (0, 0, None))[1:] if succ else (None, None))
+        out.append((rid, *stats[rid], succ["run_id"] if succ else None, match, k2, mp2))
+    return out
+
+
+def _provenance(con) -> list[str]:
+    """Section 4: what the family's runs recorded about how they were produced (read-only)."""
+    row = con.execute("""
+        WITH r AS (SELECT run_id, try_cast(params AS JSON) -> 'provenance' AS p FROM research_runs
+                   WHERE status = 'ok' AND run_id IN (SELECT DISTINCT run_id FROM hypothesis_q))
+        SELECT count(*), count(p), count(p ->> 'warehouse_sha'), count(p ->> 'config_hash'), count(p ->> 'env'),
+               count(p ->> 'selection'), count(DISTINCT p ->> 'git_sha'),
+               count(*) FILTER (WHERE (p ->> 'git_dirty') = 'true')
+        FROM r""").fetchone()
+    n, prov, wh, cfg, env, sel, commits, dirty = row
+    return ["", "## 4. Provenance of the family's runs", "",
+            "Recorded with each `ok` run that has tests in the family. Runs made before a field existed do not have "
+            "it; nothing is filled in afterwards. This table checks what was recorded; it does not re-run anything.",
+            "", "| runs | with provenance | warehouse hash | config hash | environment | selection rule | "
+            "distinct commits | uncommitted changes |", "|---|---|---|---|---|---|---|---|",
+            f"| {n} | {prov} | {wh} | {cfg} | {env} | {sel} | {commits} | {dirty} |"]

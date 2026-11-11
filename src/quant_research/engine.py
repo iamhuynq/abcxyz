@@ -79,7 +79,12 @@ def run_pattern(store: ResultsStore, pattern: Pattern, period: str, params: Rese
             stat_rows.append([run_id, label, seg, *asdict(s).values()])
     store.con.executemany(f"INSERT INTO pattern_stats VALUES ({', '.join(['?'] * 16)})", stat_rows)
     for h in params.horizons:
-        _lift_vs_universe(store, run_id, ev, h, period, params, now)
+        # The universe side of the lift is masked over this horizon's window; with per-horizon masks the
+        # pattern side must be too (the stats above use the longest window, which is the same SQL in legacy20).
+        ev_h = ev if params.mask_window == "legacy20" else _events(
+            store, pattern.source_sql(params.sample_sql(outcome_column(h)), params.min_stocks_per_date, table=table),
+            [period], params)
+        _lift_vs_universe(store, run_id, ev_h, h, period, params, now)
 
     store.con.execute(f"""
         INSERT INTO pattern_occurrences

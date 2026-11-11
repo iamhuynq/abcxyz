@@ -22,8 +22,12 @@ from fireant_crawler.store.raw_store import RawStore
 Kind = Literal["number", "integer", "string", "bool", "null"]
 Level = Literal["error", "warning"]
 
-# Plain date or date-time, as FireAnt sends it ("2026-10-01T00:00:00"). The regex fixes the shape; the value
-# must then parse with datetime.fromisoformat, as in the normalizer's `parse_date` (no 2026-02-31, no 29:70).
+# Accepted date forms (deliberately narrower than ISO 8601): YYYY-MM-DD, optionally followed by THH:MM,
+# THH:MM:SS or THH:MM:SS.fraction, optionally followed by Z or a +HH:MM / -HH:MM offset. Not accepted: a space
+# instead of T, week or ordinal dates, basic format (no separators), an offset without a colon. FireAnt sends
+# "2026-10-01T00:00:00"; the 2026-11-11 scan of all 26,428 raw files found no other form. The regex fixes the
+# shape; the value must then parse with datetime.fromisoformat, as in the normalizer's `parse_date`
+# (no 2026-02-31, no 29:70).
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?")
 
 

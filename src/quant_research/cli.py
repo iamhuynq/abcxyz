@@ -325,7 +325,12 @@ def cmd_runs(invalidate: str | None, reason: str | None) -> int:
                 print("--reason is required to invalidate a run", file=sys.stderr)
                 return 2
             if not store.invalidate(invalidate, reason):
-                print(f"No run {invalidate}; nothing changed.", file=sys.stderr)
+                row = store.con.execute("SELECT status, invalid_reason FROM research_runs WHERE run_id = ?",
+                                        [invalidate]).fetchone()
+                if row and row[0] == "invalid":
+                    print(f"Run {invalidate} is already invalid; its reason is kept: {row[1]}", file=sys.stderr)
+                else:
+                    print(f"No run {invalidate}; nothing changed.", file=sys.stderr)
                 return 1
             print(f"Run {invalidate} marked invalid (kept in the log, excluded from q-values).")
             return 0
@@ -371,8 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     dl = sub.add_parser("daily", help="Scan new sessions, update the paper portfolio, write the daily report")
     dl.add_argument("--date", help="Re-scan one session (YYYY-MM-DD)")
     runs = sub.add_parser("runs", help="List runs, or invalidate one (kept in the log)")
-    runs.add_argument("--invalidate")
-    runs.add_argument("--reason")
+    runs.add_argument("--invalidate", help="Run id. Only for a defect found independently of the result (code, data "
+                                           "or method error), never because a result is unwelcome")
+    runs.add_argument("--reason", help="The defect, named (required with --invalidate)")
     ev = sub.add_parser("events", help="Event catalog (Phase 5)")
     ev.add_argument("events_command", choices=("study",), help="study: descriptive event study, research period")
     pf = sub.add_parser("portfolio", help="Portfolio construction grid (research period, one logged test per config)")

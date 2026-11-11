@@ -1,0 +1,206 @@
+# Research integrity and reproducibility audit (plan, 2026-11-11)
+
+Source: the external spec "PR #6 - Research Integrity & Reproducibility Audit" (2026-11-11). It asks for an
+audit of the existing pipeline, executable safeguards for the invariants that can be enforced, and one report,
+`docs/research-integrity.md`. No new strategies, no methodology change made to improve results.
+
+## Starting point
+
+Much of the spec is already built. The audit consolidates it, checks it against the code, and fills gaps. It
+does not redo it.
+
+| Spec workstream | Already in the repo | Gap this plan fills |
+|---|---|---|
+| A Pipeline inventory | `data-dictionary.md`, `feature-dictionary.md`, plan docs per stage | One current map: stage -> module -> table -> tests, with timestamp semantics |
+| B Look-ahead | `03_stock_features.sql` header rule; static test (no LEAD/FOLLOWING in features, no LAG/PRECEDING in targets); `test_perturbing_the_future_does_not_change_past_features` (stock_features only) | The perturbation test does not cover `market_daily`, `market_regimes`, `stock_factors`, `stock_events` or the cross database. No test that one symbol's data never moves another symbol's time-series features |
+| C Labels | `04_stock_targets.sql` (close-to-close and executable conventions, `target_complete`, per-horizon masks); reference tests | No written formula/timing table per label; no explicit test that targets never cross symbols, and that incomplete windows are NULL for every horizon |
+| D Splits | Fixed chronological periods in `01_daily_panel.sql`; `crosses_period*` purge masks; `--prereg` / `--final` gates; holdout frozen and its reuse recorded | Written split policy; a test that every period gate and purge mask agrees with the period boundaries in one place (the dates are repeated in 6 SQL CASE blocks) |
+| E Universe | `quant audit pit` (delisted coverage, stopped stocks, attributes known only at current value, limit-band sensitivity) | State plainly that point-in-time index/exchange/industry membership is not supported; check that report headers say so |
+| F Masks | Point-in-time universe split from named outcome masks (PR #4); `quant audit masks` with denominators, by-year and concentration tables | Mask alignment test across pattern, scan and interaction loaders (same rows for the same params) |
+| G FDR | `hypothesis_q` (BH, BY), `quant audit fdr`, statsmodels cross-check, tie test | Edge cases: NaN p-values (not filtered by `IS NOT NULL`), duplicate labels, all-NULL; family membership changes through `invalidate` (260 of 555 logged tests sit in invalid runs) |
+| H Reproducibility | `provenance.collect`: git SHA + dirty flag, warehouse SHA, feature build, research code hash, config hash; seeds of random controls stored | No library versions (DuckDB, NumPy, pandas, Python) in provenance; no deterministic re-run check |
+
+## Candidate findings (to verify during the audit; severity set only after evidence)
+
+1. **NaN p-values in the FDR family.** `hypothesis_q` filters `p_value IS NOT NULL`, but NaN is not NULL in
+   DuckDB and sorts last. A NaN would count in m and shift every q. The store has 0 NaN today, and
+   `stats.py` can return NaN. Expected fix: `log_hypothesis` stores NaN as NULL (or refuses it), with a test.
+2. **Family membership through invalidation.** Invalidating a run removes its tests from m. All 41 invalid
+   runs have a methodological reason, and most were re-run. The audit checks that every invalidated run with
+   logged tests has a successor of the same kind and name, and lists any that do not. No historical row is
+   changed.
+3. **Look-ahead coverage of derived tables.** Extend the perturbation test to regimes, factors, events and the
+   cross build. If any changes, it is a defect and is fixed. `stock_events` thresholds came from the
+   research-period distribution (documented). They are fixed constants, so no leak at run time, and are
+   reported as informational.
+4. **Period boundaries repeated in SQL.** `2023-12-31`, `2025-12-31`, `2026-10-02` appear in six CASE blocks
+   and in Python. A test asserts that they all agree with one constant. No refactor of the SQL.
+5. **Point-in-time universe limits** (exchange and industry at their current value, no index membership,
+   back-adjusted prices from the vendor). These are accepted limitations, already measured by `audit pit`.
+   They are restated, not re-measured.
+6. **Environment in provenance.** Add library versions as a new key. Old runs keep what they stored.
+
+## Work
+
+1. Branch `research-integrity-audit` from `main`.
+2. Inventory (A): section "Pipeline" of `docs/research-integrity.md`. For each stage: entry point, module,
+   output table, the time each row is known (decision at close t, entry at open t+1, exit at close t+h),
+   tests. Current behaviour only.
+3. Look-ahead (B): extend the perturbation test to every point-in-time table, plus a cross-symbol isolation
+   test. Each new test is mutation-checked: a planted `lead()` or a widened window must fail it.
+4. Labels (C): a formula and timing table for every target column. Tests for symbol isolation and incomplete
+   windows at every horizon. Name the difference between predictive labels (`fwd_ret_*`) and tradable,
+   net-of-cost returns (backtest and econ only).
+5. Splits (D): written split policy (chronological, fixed dates, purge by `crosses_period_<h>d`, no fitted
+   preprocessing across periods; factor normalization is per date, regime terciles use trailing windows).
+   Period-boundary consistency test. Holdout reuse: list the holdout runs from `results.duckdb`.
+6. Universe and masks (E, F): restate the `audit pit` and `audit masks` results with their dates. Add a mask
+   alignment test across loaders.
+7. FDR (G): family definition (global, every logged test of every valid run, exploratory). Fix candidate 1.
+   Check candidate 2 with a read-only query. Edge-case tests: NaN, NULL, duplicate label (primary key), ties,
+   m = 1. Trace one q-value back to its run and label in the report.
+8. Reproducibility (H): add an `env` key to provenance. Add a fixture experiment: build the synthetic research
+   database twice, run a pattern and a scan on each, and compare the stored statistics. Floats must be equal
+   to 1e-12; run IDs and timestamps are excluded. Document how to run it.
+9. Report `docs/research-integrity.md`: summary, pipeline map, invariants, findings in the spec's format,
+   coverage (test -> what it proves), limitations, follow-ups.
+10. Full suite, README (if a command changes), STATUS, a Result section here, one commit per workstream
+    group. The user pushes.
+
+## Not in scope
+
+- No change to recorded definitions, pre-registrations, `registry_seed.py`, stored runs or registry state.
+  No re-run of recorded research for new numbers.
+- No point-in-time exchange, industry or index membership data: there is no source. It stays a stated
+  limitation.
+- No ML split machinery: there is no fitted model in the repo (Phase 7 not started).
+- Group C items (Retry-After, `adj_ratio` overlap audit, backup runbook): separate milestone.
+
+## Rollback
+
+Code, tests and docs only, on a branch. Revert the merge commit. The provenance `env` key is additive (readers
+use `.get`). The NaN guard affects only future `log_hypothesis` calls.
+
+## Success criteria
+
+- `docs/research-integrity.md` exists, with every finding in the spec's format and evidence (file:line, query
+  or test).
+- New tests pass, and each fails under a planted defect (mutation check recorded here).
+- No Critical or High finding left open without the user's explicit acceptance.
+- Full suite green; `results.duckdb` and the registry unchanged (same row counts and states, before and after).
+
+## Result (2026-11-11)
+
+Branch `research-integrity-audit`, based on `pr5-review-fixes` (the PR #5 review commit, which missed the
+merge; it goes in its own PR first). Report: `research-integrity.md`. Full suite: 476 passed (451 before).
+`results.duckdb` and the registry are unchanged (row counts of every table, run states and hypothesis states
+compared before and after).
+
+How the candidate findings turned out:
+
+1. NaN p-values: confirmed and fixed (G-1). There are no NaN p-values in the store, so no q-value changes.
+2. Invalidation: all 39 invalid runs with tests have a later `ok` re-run. This is now reported in section 3 of
+   `quant audit fdr` (G-2), and the real report shows 0 runs without a re-run.
+3. Look-ahead coverage: over-stated. Per-table perturbation tests already existed for factors, regimes, events,
+   cost inputs and cross. Added instead:
+   - one test over every column of every table;
+   - a vendor-restatement test;
+   - a symbol-isolation test;
+   - a table classification test (B-1).
+4. Period boundaries: all 11 places agree, and a test now checks them.
+5. Universe limits: restated (E-1, E-2).
+6. Environment: added to provenance (H-3).
+
+Found during the audit, not in the plan:
+
+- **F-1.** With per-horizon masks, the two sides of a pattern lift used different rows. This was reproduced
+  with a test and fixed.
+  - Measured on the real research data: 15 patterns x 5 and 10 sessions, using a scratch script that computes
+    both lifts with the engine's own `_events` and `universe_by_date`.
+  - Largest lift change 0.0004 (`drop3_volume2` at 10 sessions: -0.00648 to -0.00612). No p-value crosses
+    0.05.
+- **H-1.** Floats are not bit-identical between runs; the largest relative difference is 2.6e-13. A comparison
+  policy is written down and tested.
+- **H-2.** Decile selections had no tie-break. `momentum10_d10` varied by 74 rows from run to run.
+  - The owner approved the fix: `ORDER BY feature, symbol` in `patterns.py` and `backtest/data.py`.
+  - The order_imbalance selections and the backtest loader arrays are identical to before.
+  - momentum10_d10 is now deterministic.
+
+Mutation check: 21 planted defects, all caught by an assertion:
+- 9 look-ahead, label and period;
+- 4 FDR family;
+- 2 FDR report;
+- 3 reproducibility;
+- 1 lift masks;
+- 2 decile tie-breaks. The first fixture let both tie-break mutations survive, because a small single-thread
+  sort happened to pick the right set; the fixture now loads several physical row orders.
+
+`quant audit fdr` was re-run on the real store: `data/reports/research/audit-fdr-20261111T142439.md`.
+
+## PR #7 review (external, 2026-11-11): assessment and plan
+
+Each point was checked against the code and `results.duckdb` (read-only) before this plan.
+
+| Point | Verified | Assessment | Action |
+|---|---|---|---|
+| P1 invalidation can remove tests after results were seen | Yes. 39 invalidated runs; their re-runs went both ways. More favourable: `drop3_volume2` 0/6 -> 3/6 tests at p < 0.05 (the primary test changed from mean-vs-zero to lift), `volume_spike` 1/3 -> 3/3, `portfolio-C3` p 0.0548 -> 0.0428 (the PR #2 review valuation rule). Less favourable: `cross-h2` 2/3 -> 1/3. With the family of all 555 attempted tests (invalid runs included), BH passes 123 instead of 120 and **no BY verdict changes**. | Valid governance point; no recorded decision depends on it | 1. `quant audit fdr` section 3 adds the all-attempts family: m, the BH and BY counts, and every `ok` test whose verdict differs between the two families. 2. Per invalidated run: tests at p < 0.05, and min p, before and after its re-run. 3. A written invalidation policy (only for a defect established independently of the result; the reason names it), also in `quant runs --invalidate` help. 4. A nullable `invalidated_at` column on `research_runs`, set by new invalidations; old rows stay NULL (unknown). Actor: single-user system, not recorded. The successor stays computed by name (it does not exist yet when a run is invalidated). |
+| P2 synthetic reproducibility is not historical reproducibility | Partly. `test_provenance.py` already asserts `warehouse_sha`, `feature_build_id`, `code_hash`, `config_hash`; `env` is new and tested | Valid as a documentation boundary | State the boundary in the report. Real-data check: a provenance table in `quant audit fdr` (`ok` runs with provenance, with `env`, distinct commits), read-only |
+| P2 FDR audit fan-out | `count(DISTINCT run_id)` and `row_number()` are correct by construction; the existing fixtures do not combine every case | Defensive coverage | One fixture: a hypothesis linked through both a transition and its pattern to the same run, two runs, several labels, ties across runs and labels, and one hypothesis with no test |
+| P2 tie policy not in the pattern version | Yes. `Pattern.version` hashes the condition only. `research_code_hash` (stored with every run) did change with the fix | Valid. Changing the version hash would re-version three recorded patterns and break the frozen registry links (`registry_seed.py`) | Add `selection: "decile ties by symbol"` to provenance for new runs. Document: version = condition, code hash = implementation. Historical runs unchanged |
+| P2 cross-sectional and mid-series coverage | Yes, not covered explicitly | Coverage | Tests: (a) one symbol changed after a cutoff leaves factors and regimes unchanged before it, and changes them after; (b) a gap inside a series (the dropped zero-price row of STK) is skipped by outcome windows, which count the symbol's own sessions. Restatement variants other than a uniform rescale stay a limitation (the `adj_ratio` overlap audit is in the backlog) |
+| P3 report overstates coverage | Yes | Valid | Reword the summary as suggested |
+| P3 ISO date formats | The regex accepts `YYYY-MM-DD` with an optional `THH:MM[:SS[.f]]` and an optional `Z` or `+HH:MM` offset | Valid, documentation only | Docstring lists the accepted forms; the 2026-11-11 scan of 26,428 raw files found only these |
+
+Rollback: code, tests and docs, plus one additive nullable column. A backup
+`data/results.before-pr7-fixes.duckdb` is taken before the first open with the new schema; dropping the column
+restores the old schema. No stored row changes.
+
+### PR #7 review fixes: result (2026-11-11)
+
+All points were done as planned, with one change. `invalidated_at` is an append-only table,
+`run_invalidations (run_id, invalidated_at, reason)`, not a column. Code and tests insert into `research_runs`
+by position, so a new column would have broken them.
+
+- Backup `data/results.before-pr7-fixes.duckdb` was taken first (same SHA-256 as the live file at that moment).
+  After the change, every table has the same row count, run and hypothesis states are unchanged, and the only
+  addition is the empty `run_invalidations`.
+- `quant audit fdr` on the real store: `audit-fdr-20261111T150337.md`.
+  - All-attempts family: m = 555. BH passes 123 versus 120, and BY passes 86 versus 86. The three tests whose
+    verdict differs pass only with all attempts.
+  - Section 4: 8 of 65 family runs have provenance, and all 8 were made with uncommitted `src/` changes. This
+    is new finding H-4, informational.
+- New tests:
+  - all-attempts and before / after tables (hand-computed m = 6 case);
+  - join fan-out;
+  - invalidation record;
+  - `selection` in provenance;
+  - cross-sectional tables after a one-symbol change;
+  - a mid-series gap.
+- Mutation check: 7 more, all caught by an assertion. A first mutation for the gap test (keep the zero-price
+  row) failed the build with an error instead; it was replaced by a calendar-day outcome window.
+
+## PR #7 second review (external, 2026-11-11, head `90cbaf8`): assessment and plan
+
+| Point | Verified on code and data | Assessment | Action |
+|---|---|---|---|
+| P2 successor found by run name only | Yes. On the real store, 36 of 39 invalid -> successor pairs have the same kind, pattern, period, pattern version and stored parameters (provenance excluded). The other 3 are cross runs. They differ in `cross_build_id` and `cross_code_hash`, which are the fixed rebuild itself. Two of them (`h2_large_to_small`, `leadlag_persistence`) also differ in pattern version: the test was redefined (v2), as their invalidation reasons say. Name-only matching hides that. | Valid | Successor = the earliest later `ok` run with the same experiment identity: kind, pattern name, period, pattern version, and stored parameters without provenance and without data or code identifiers (`*_build_id`, `*_code_hash`). Those identifiers may differ: a re-run after a fix uses new code or a rebuilt input by design. If no run matches, the report shows the earliest same-name `ok` run with the fields that differ ("definition changed: version"; "parameters differ: ..."), and counts it as without a matching re-run. Tests: a same-name run with other parameters is not a successor; a same-name run that differs only in build or code id is. |
+| P2 invalidation policy not enforced; table not protected | Yes, plus a defect: invalidating an already-invalid run is accepted. It overwrites the recorded `invalid_reason` and adds a second `run_invalidations` row. | Policy: accepted limitation (single user). Re-invalidation: fix. | `invalidate` changes only a run that is not yet invalid (returns 0 otherwise; the CLI says "already invalid, reason kept"). Test. Append-only stays a convention: DuckDB has no per-table write permissions, so this is documented. |
+| P3 `SELECTION` is a hand-written string | Yes | Valid | One constant `DECILE_TIE_BREAK = "symbol"` in `patterns.py` builds both ORDER BY clauses (`patterns.py`, `backtest/data.py`). Provenance derives `selection` from it, versioned as `"deciles v2: ties by symbol"`. Test: both SQL texts contain the tie-break that provenance names. |
+
+No change to stored rows. The re-run report is regenerated.
+
+### PR #7 second review fixes: result (2026-11-11)
+
+Done as planned.
+
+- **Successors by experiment identity.**
+  - Real store: 37 of 39 invalidated runs have a re-run of the same experiment. 2 were re-run with a
+    redefined test (version changed), and the report now shows that
+    (`audit-fdr-20261111T152351.md`).
+  - Tests: a same-name run with other parameters is not a successor; a run that differs only in build or code
+    id is; a version change is reported.
+- **Re-invalidation.** It is refused; the first reason is kept, and the CLI prints it.
+- **Selection rule.** `patterns.DECILE_TIE_BREAK` builds both ORDER BY clauses and the provenance string
+  (`deciles v2: ties by symbol`). The SQL text is unchanged, so the selections are unchanged.
+- **Checks.** Mutation check: 6 more, all caught; the two earlier tie-break mutations, retargeted at the
+  constant, are still caught. `results.duckdb` data is unchanged.

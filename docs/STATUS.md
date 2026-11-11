@@ -137,7 +137,7 @@ Registry). Summary:
     (the BY column and the vendor-schema canary are done, below).
 - Post-merge checklist (external, 2026-11-11): checked on `730464a`. 406 tests pass, the raw store never
   exposes partial files, and the mask audit already has provenance. Its P2 items A and B were done (plan
-  `contract-and-fdr-plan.md`, branch `contract-and-fdr`, not pushed):
+  `contract-and-fdr-plan.md`, branch `contract-and-fdr`, merged as PR #5, `1cf111a`):
   - payload contracts: `fireant validate` checks the latest raw files and stops `daily.sh` on a contract
     error (`--no-contract` skips the check); `fireant contract scan` over all 26,428 raw files finds 0
     errors;
@@ -149,6 +149,40 @@ Registry). Summary:
     (a race already on `main`, hit by the slow CI runner).
   - PR #5 review fixes (same branch): contract dates must really parse, the FDR report picks one row per
     hypothesis and names the global family, and a contract-failure runbook is in `README.md`. 451 tests pass.
+- PR #5 was merged on 2026-11-11 without its review-fix commit, which had not been pushed. The commit is on
+  branch `pr5-review-fixes` (one cherry-picked commit on `main`, 451 tests pass). It goes in its own PR, before
+  PR #6.
+- Research integrity audit (external spec "PR #6", 2026-11-11; plan `research-integrity-plan.md`, report
+  `research-integrity.md`, branch `research-integrity-audit` on top of `pr5-review-fixes`, not pushed):
+  - every research table is classified as point in time or outcome. Tests cover future perturbation of every
+    column, vendor `adj_ratio` restatements, symbol isolation, incomplete outcome windows and the period
+    boundaries;
+  - fixed F-1: with per-horizon masks, the pattern lift compared different rows on its two sides. Recorded
+    runs (legacy20) are unaffected, and no mask-audit p-value crosses 0.05;
+  - fixed G-1: a NaN p-value would have entered the FDR family (the store has none). `quant audit fdr` now
+    lists invalid runs and their re-runs: all 39 were re-run;
+  - provenance records library versions; a reproducibility test runs the same build and experiment twice.
+    Floats agree within 1e-9 (largest difference seen: 2.6e-13);
+  - fixed H-2 (owner approved): decile selections break ties by symbol (`patterns.py`, `backtest/data.py`).
+    The order_imbalance selections and the frozen strategy's data are identical to before. `momentum10_d10`
+    (P3-C2, failed) is now deterministic; it varied by 74 rows between runs;
+  - 476 tests pass; 21 mutations, all caught; `results.duckdb` and the registry are unchanged.
+  - Pushed as PR #7. Review fixes (ChatGPT review, 2026-11-11), same branch:
+    - invalidation policy, and the append-only `run_invalidations` table (backup
+      `data/results.before-pr7-fixes.duckdb`);
+    - `quant audit fdr` compares the family with all 555 attempts (no BY verdict changes; BH 120 vs 123), shows
+      each invalid run's re-run before and after, and has a provenance table. Only 8 of 65 family runs have
+      provenance, all made with uncommitted code (H-4);
+    - `selection` in provenance;
+    - tests for join fan-out, cross-sectional tables and a mid-series gap;
+    - report wording qualified; accepted date formats documented;
+    - 480 tests pass; 28 mutations in all, every one caught.
+  - Second review (head `90cbaf8`), same branch:
+    - an invalidated run's successor must be the same experiment, not only the same name. 37 of 39 match;
+      2 cross tests were re-run with a redefined test, and the report now says so;
+    - an invalid run cannot be invalidated again;
+    - the decile tie-break is one constant, shared by both selections and by provenance;
+    - 483 tests pass; 34 mutations in all, every one caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

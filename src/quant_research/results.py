@@ -3,13 +3,19 @@
 Never rebuilt. Runs are invalidated, not deleted, so the multiple-testing log stays complete. Run status:
 running (started) -> ok (finished) or failed (raised); invalid is set by hand with a reason.
 The research database is attached READ_ONLY as `rs`.
+
+Invalidation policy (docs/research-integrity.md, G-2): invalidate a run only for a defect established
+independently of its result (a code, data or method error that the reason names), never because a result is
+unwelcome. The run, its tests and the reason stay; `run_invalidations` records when (from 2026-11-11), and
+`quant audit fdr` compares the family with and without invalid runs.
 """
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -44,6 +50,9 @@ CREATE TABLE IF NOT EXISTS pattern_lifts (
 CREATE TABLE IF NOT EXISTS pattern_occurrences (
     run_id VARCHAR NOT NULL, symbol VARCHAR NOT NULL, date DATE NOT NULL, market_regime VARCHAR,
     exchange_now VARCHAR, out_5d DOUBLE, out_10d DOUBLE, out_20d DOUBLE, PRIMARY KEY (run_id, symbol, date));
+-- Append-only record of invalidations made from 2026-11-11 on (older invalidations have no row: time unknown).
+CREATE TABLE IF NOT EXISTS run_invalidations (
+    run_id VARCHAR NOT NULL, invalidated_at TIMESTAMPTZ NOT NULL, reason VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_deciles (
     run_id VARCHAR NOT NULL, feature VARCHAR NOT NULL, horizon VARCHAR NOT NULL, segment VARCHAR NOT NULL,
     decile INTEGER NOT NULL, mean DOUBLE, n_dates BIGINT, n_events BIGINT,
@@ -61,7 +70,7 @@ CREATE TABLE IF NOT EXISTS hypothesis_log (
 CREATE OR REPLACE VIEW hypothesis_q AS
 WITH h AS (
     SELECT h.*, r.kind, r.pattern_name FROM hypothesis_log h JOIN research_runs r USING (run_id)
-    WHERE r.status = 'ok' AND h.p_value IS NOT NULL
+    WHERE r.status = 'ok' AND h.p_value IS NOT NULL AND NOT isnan(h.p_value)   -- NaN is not NULL in DuckDB
 ), ranked AS (
     SELECT *, row_number() OVER (ORDER BY p_value, run_id, label) AS rk, count(*) OVER () AS m FROM h
 ), adjusted AS (
@@ -252,15 +261,25 @@ class ResultsStore:
         return collect(self.con, research_code_hash(), config_json)
 
     def log_hypothesis(self, run_id: str, label: str, period: str, p_value: float | None, now: datetime) -> None:
+        """Log one test. A p-value that could not be computed (None or NaN) is stored as NULL: the test stays
+        on record but is outside the FDR family. A p-value outside [0, 1] is a bug and is refused."""
+        if p_value is not None and math.isnan(p_value):
+            p_value = None
+        if p_value is not None and not 0.0 <= p_value <= 1.0:
+            raise ValueError(f"p-value {p_value!r} of {run_id}/{label} is outside [0, 1]")
         self.con.execute("INSERT OR REPLACE INTO hypothesis_log VALUES (?, ?, ?, ?, ?)",
                          [run_id, label, period, p_value, now])
 
-    def invalidate(self, run_id: str, reason: str) -> int:
-        cur = self.con.execute("UPDATE research_runs SET status = 'invalid', invalid_reason = ? WHERE run_id = ?",
-                               [reason, run_id])
+    def invalidate(self, run_id: str, reason: str, now: datetime | None = None) -> int:
+        """Mark a run invalid (see the invalidation policy in the module docstring) and record when. Returns 0 for
+        an unknown run and for a run that is already invalid (its first reason is kept, nothing is recorded)."""
+        cur = self.con.execute("""UPDATE research_runs SET status = 'invalid', invalid_reason = ?
+                                  WHERE run_id = ? AND status <> 'invalid'""", [reason, run_id])  # reason kept once set
         changed = cur.fetchone()[0]
         if changed:
             self._open_runs.discard(run_id)                          # an invalid run is closed: never 'failed' later
+            self.con.execute("INSERT INTO run_invalidations VALUES (?, ?, ?)",
+                             [run_id, now or datetime.now(UTC), reason])
         return changed
 
     def q_values(self, run_id: str) -> dict[str, float]:

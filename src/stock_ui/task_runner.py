@@ -52,6 +52,11 @@ def main(argv: list[str]) -> int:
                 log.write(f"could not start: {exc}\n".encode())
                 rc = 127
         rec.exit_code, rec.cancelled, rec.ended_at = rc, cancelled, _now()
+        # Release before the record says "ended": a reader that sees the end must also see the lock gone.
+        # Until the save, the record still shows this run as running, so no other task can start.
+        if owns_lock:
+            locks.release(data_dir)
+            owns_lock = False
         save_record(data_dir, rec)
         return 0
     finally:

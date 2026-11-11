@@ -101,3 +101,11 @@ def benjamini_hochberg(p_values: list[float]) -> list[float]:
         running = min(running, p_values[i] * m / rank)
         q[i] = running
     return q
+
+
+def benjamini_yekutieli(p_values: list[float]) -> list[float]:
+    """BY-adjusted q-values, same order as the input: BH times c(m) = 1 + 1/2 + ... + 1/m, capped at 1.
+    Valid under any dependence between the tests (BH needs independence or positive dependence)."""
+    m = len(p_values)
+    c_m = sum(1.0 / i for i in range(1, m + 1))
+    return [min(1.0, q * c_m) for q in benjamini_hochberg(p_values)]

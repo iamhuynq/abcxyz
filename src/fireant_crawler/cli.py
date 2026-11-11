@@ -25,6 +25,7 @@ from fireant_crawler.store.migrations import plan_schema_changes
 from fireant_crawler.sessions import final_session
 from fireant_crawler.store.warehouse import PRIMARY_KEYS, SchemaOutOfDateError, Warehouse
 from fireant_crawler.validate.checks import render_validation_report, run_checks
+from fireant_crawler.validate.contract import CHECKED_JOBS, check_files, raw_files, render_contract_section
 from fireant_crawler.validate.export import export_parquet
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -196,7 +197,9 @@ def _open_read_only(settings: Settings) -> duckdb.DuckDBPyConnection | None:
     return con
 
 
-def cmd_validate(settings: Settings) -> int:
+def cmd_validate(settings: Settings, contract: bool = True) -> int:
+    """Warehouse checks, plus the payload contract of the raw files of each job's latest fetch date
+    (skipped with --no-contract, for a day when the contract itself is wrong)."""
     con = _open_read_only(settings)
     if con is None:
         return 1
@@ -204,14 +207,30 @@ def cmd_validate(settings: Settings) -> int:
         results = run_checks(con)
         totals = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in PRIMARY_KEYS}
     now = datetime.now(VN_TZ).replace(microsecond=0)
+    report = render_validation_report(results, totals, now)
+    contract_errors = 0
+    if contract:
+        checked = check_files(raw_files(RawStore(settings.data_dir), latest_only=True))
+        contract_errors = checked.errors
+        report += "\n".join(render_contract_section(checked, "latest fetch date of each job")) + "\n"
+    else:
+        report += "\n## Contract\n\nSkipped (--no-contract).\n"
     report_dir = settings.data_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"validation-{now.date().isoformat()}.md"
-    report_path.write_text(render_validation_report(results, totals, now), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
     for r in results:
         print(f"  {r.check.severity:5} {r.check.name:30} {r.count:>10,}")
+    print(f"  {'error':5} {'payload_contract':30} {contract_errors:>10,}" if contract else "  contract skipped")
     print(f"Report: {report_path}")
-    return 1 if any(r.check.severity == "error" and r.count for r in results) else 0
+    return 1 if contract_errors or any(r.check.severity == "error" and r.count for r in results) else 0
+
+
+def cmd_contract_scan(settings: Settings, jobs: list[str], since: str | None) -> int:
+    """Check stored raw files against the payload contracts (read-only)."""
+    checked = check_files(raw_files(RawStore(settings.data_dir), jobs, since=since))
+    print("\n".join(render_contract_section(checked, f"jobs {','.join(jobs)}" + (f", since {since}" if since else ""))))
+    return 1 if checked.errors else 0
 
 
 def cmd_export(settings: Settings) -> int:
@@ -240,7 +259,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show table counts and task states (read-only)")
     mig = sub.add_parser("migrate", help="Apply schema.sql changes (new tables/views); --dry-run lists them")
     mig.add_argument("--dry-run", action="store_true")
-    sub.add_parser("validate", help="Run data-quality checks and write a report (read-only)")
+    val = sub.add_parser("validate", help="Run data-quality checks and write a report (read-only)")
+    val.add_argument("--no-contract", action="store_true", help="Skip the raw payload contract check")
+    con = sub.add_parser("contract", help="Payload contract checks on stored raw files (read-only)")
+    con_sub = con.add_subparsers(dest="contract_command", required=True)
+    scan = con_sub.add_parser("scan", help="Check every stored raw file (or those fetched since a date)")
+    scan.add_argument("--job", choices=CHECKED_JOBS, action="append", help="Repeatable; default: all")
+    scan.add_argument("--since", help="Fetch date YYYY-MM-DD (inclusive)")
     sub.add_parser("export", help="Export tables and views to data/parquet (read-only)")
     return parser
 
@@ -266,7 +291,9 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "status":
         return cmd_status(settings)
     if args.command == "validate":
-        return cmd_validate(settings)
+        return cmd_validate(settings, contract=not args.no_contract)
+    if args.command == "contract":
+        return cmd_contract_scan(settings, args.job or list(CHECKED_JOBS), args.since)
     if args.command == "export":
         return cmd_export(settings)
     if not _require_token(settings):

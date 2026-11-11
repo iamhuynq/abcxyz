@@ -25,7 +25,8 @@ scripts/ui.sh                # local UI on http://127.0.0.1:8501 (Ctrl+C to stop
 
 | Command | Purpose |
 |---------|---------|
-| `uv run fireant update` / `backfill` / `status` / `validate` | Crawler (GET-only, whitelisted paths) and data checks |
+| `uv run fireant update` / `backfill` / `status` / `validate` | Crawler (GET-only, whitelisted paths) and data checks; `validate` also checks the latest raw payloads against their contracts (`--no-contract` skips that) |
+| `uv run fireant contract scan [--job J] [--since DATE]` | Check stored raw files against the payload contracts (read-only) |
 | `uv run quant build` | Rebuild `research.duckdb` (features, targets, event catalog) from the warehouse |
 | `uv run quant daily` | Scan new sessions, paper portfolio, daily reports |
 | `uv run quant pattern` / `scan` / `backtest` | Research runs (research period by default; other periods need `--prereg`) |
@@ -36,6 +37,7 @@ scripts/ui.sh                # local UI on http://127.0.0.1:8501 (Ctrl+C to stop
 | `uv run quant econ evaluate` | Economic evaluation: cost model v1, capital levels, benchmarks, matched controls (research period, not logged) |
 | `uv run quant portfolio evaluate` | Portfolio construction grid C1-C6 (research period, one logged test per config) |
 | `uv run quant audit pit` | Point-in-time and survivorship audit (descriptive, read-only) |
+| `uv run quant audit masks` / `fdr` | Outcome-mask sensitivity; BY q-values next to BH (descriptive, not logged) |
 | `uv run quant runs --invalidate RUN --reason TEXT` | Invalidate a run (runs are never deleted) |
 | `uv run quant registry list` / `show ID` / `add` / `move` | Research Registry: every hypothesis, its state and decision (append-only) |
 

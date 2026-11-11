@@ -5,7 +5,7 @@ import pytest
 import statsmodels.api as sm
 from statsmodels.stats.multitest import multipletests
 
-from quant_research.stats import benjamini_hochberg, date_means, mean_test, newey_west_se, summarize
+from quant_research.stats import benjamini_hochberg, benjamini_yekutieli, date_means, mean_test, newey_west_se, summarize
 
 
 @pytest.mark.parametrize("lag", [0, 1, 4, 9, 19])
@@ -21,6 +21,17 @@ def test_benjamini_hochberg_matches_statsmodels():
     expected = multipletests(p, method="fdr_bh")[1]
     assert benjamini_hochberg(p) == pytest.approx(list(expected), rel=1e-12)
     assert benjamini_hochberg([]) == []
+
+
+def test_benjamini_yekutieli_matches_statsmodels_and_a_hand_example():
+    p = list(np.random.default_rng(2).uniform(size=50) ** 3)
+    expected = multipletests(p, method="fdr_by")[1]
+    assert benjamini_yekutieli(p) == pytest.approx(list(expected), rel=1e-12)
+    assert all(by >= bh for by, bh in zip(benjamini_yekutieli(p), benjamini_hochberg(p)))
+    # m = 3, c(m) = 1 + 1/2 + 1/3 = 11/6; BH q = 0.03 for all three, so BY = 0.03 * 11/6 = 0.055
+    assert benjamini_yekutieli([0.01, 0.02, 0.03]) == pytest.approx([0.055] * 3)
+    assert benjamini_yekutieli([0.5, 0.9]) == [1.0, 1.0]
+    assert benjamini_yekutieli([]) == []
 
 
 def test_date_means_weight_each_date_equally():

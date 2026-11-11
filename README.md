@@ -37,7 +37,7 @@ scripts/ui.sh                # local UI on http://127.0.0.1:8501 (Ctrl+C to stop
 | `uv run quant econ evaluate` | Economic evaluation: cost model v1, capital levels, benchmarks, matched controls (research period, not logged) |
 | `uv run quant portfolio evaluate` | Portfolio construction grid C1-C6 (research period, one logged test per config) |
 | `uv run quant audit pit` | Point-in-time and survivorship audit (descriptive, read-only) |
-| `uv run quant audit masks` / `fdr` | Outcome-mask sensitivity; BY q-values next to BH (descriptive, not logged) |
+| `uv run quant audit masks` / `fdr` | Outcome-mask sensitivity; BY q-values next to BH, and logged tests outside the FDR family (descriptive, not logged) |
 | `uv run quant runs --invalidate RUN --reason TEXT` | Invalidate a run (runs are never deleted) |
 | `uv run quant registry list` / `show ID` / `add` / `move` | Research Registry: every hypothesis, its state and decision (append-only) |
 
@@ -46,6 +46,7 @@ scripts/ui.sh                # local UI on http://127.0.0.1:8501 (Ctrl+C to stop
 ```bash
 uv run pytest -q                                   # full suite
 uv run pytest tests/research/test_events.py -q     # one file
+uv run pytest tests/research/test_integrity.py tests/research/test_reproducibility.py -q   # integrity invariants
 uv run pytest tests/test_jobs.py::test_pagination  # one test
 ```
 
@@ -76,5 +77,6 @@ names the job, the field, the rule and an example file. It never shows values.
 - `src/quant_research/`: feature SQL, pattern engine, statistics, backtest, daily pipeline, cross-stock,
   events.
 - `src/stock_ui/`: Streamlit pages; read-only on the databases.
-- `docs/`: plans, results, pre-registrations (never edited after their runs).
+- `docs/`: plans, results, pre-registrations (never edited after their runs). `docs/research-integrity.md`:
+  pipeline map, timing conventions, integrity findings and known limitations.
 - `scripts/`: daily pipeline, optional launchd installer (not installed), UI launcher.

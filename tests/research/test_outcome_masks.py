@@ -2,6 +2,7 @@
 definition, each mask is separate, and the per-horizon masks use the target's own window."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -98,3 +99,22 @@ def test_stored_params_unchanged_for_the_recorded_definition():
                             "horizons", "extra"}
     custom = stored_params(ResearchParams(outcome_masks=("quality",)))
     assert custom["outcome_masks"] == ("quality",) and custom["mask_window"] == "legacy20"
+
+
+@pytest.mark.parametrize("window", ["legacy20", "horizon"])
+def test_pattern_lift_compares_the_same_rows_on_both_sides(con, tmp_path, window):
+    """A pattern that matches every row must have a lift of exactly 0 at every horizon: the pattern side and
+    the universe side of the lift use the same masked sample (integrity audit, finding F-1)."""
+    from quant_research.engine import run_pattern
+    from quant_research.patterns import Pattern
+    from quant_research.results import ResultsStore
+
+    research = Path(con.execute("SELECT path FROM duckdb_databases() WHERE database_name = current_database()").fetchone()[0])
+    params = ResearchParams(**LOOSE, min_stocks_per_date=1, mask_window=window)
+    with ResultsStore(tmp_path / "results.duckdb", research) as store:
+        run_id = run_pattern(store, Pattern("everything", "TRUE", "every row"), "research", params, BUILT_AT)
+        lifts = store.con.execute("SELECT horizon, n_dates, lift FROM pattern_lifts WHERE run_id = ?",
+                                  [run_id]).fetchall()
+    assert {h for h, _n, _l in lifts} == {"exec_excess_5d", "exec_excess_10d", "exec_excess_20d"}
+    for h, n, lift in lifts:
+        assert n > 200 and lift == pytest.approx(0.0, abs=1e-15), (h, lift)

@@ -16,6 +16,7 @@ from quant_research.backtest.report import GRID, grid_label, render_backtest
 from quant_research.backtest.runner import run_backtest
 from quant_research import registry_cli
 from quant_research.cross import cli as cross_cli
+from quant_research.risk import cli as risk_cli
 from quant_research.daily import run_daily
 from quant_research.event_study import render_event_study, run_event_study
 from quant_research.daily_report import write_reports
@@ -401,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="describe: factor structure on the research period (descriptive, no returns)")
     cross_cli.add_parser(sub)
     registry_cli.add_parser(sub)
+    risk_cli.add_parser(sub)
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
@@ -434,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_factors_describe()
         if args.command == "registry":
             return registry_cli.run(args, _store)
+        if args.command == "risk":
+            return risk_cli.run(args, _store, _write_report, _paths()[1].parent / "cross.duckdb")
     except HoldoutLockedError as exc:
         print(f"Refused: {exc}", file=sys.stderr)
         return 5

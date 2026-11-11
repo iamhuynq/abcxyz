@@ -4,28 +4,14 @@ labels, paper weights."""
 import duckdb
 import pandas as pd
 
+from quant_research.risk.data import exposure_returns
 from stock_ui.db import Reader, ReadResult
 
 SESSIONS = 120
 
 
 def _returns(con: duckdb.DuckDBPyConnection, symbols: tuple[str, ...]) -> dict:
-    marks = ", ".join("?" for _ in symbols)
-    start = con.execute(f"SELECT min(date) FROM (SELECT date FROM market_daily ORDER BY date DESC LIMIT {SESSIONS + 1})"
-                        ).fetchone()[0]
-    stocks = con.execute(f"""
-        WITH p AS (SELECT symbol, date, adj_close, is_traded AND NOT price_jump AND NOT bad_source_date AS ok,
-                          lag(adj_close) OVER w AS prev_close,
-                          lag(is_traded AND NOT price_jump AND NOT bad_source_date) OVER w AS prev_ok
-                   FROM daily_panel WHERE symbol IN ({marks}) AND date >= ?
-                   WINDOW w AS (PARTITION BY symbol ORDER BY date))
-        SELECT symbol, date, CASE WHEN ok AND prev_ok AND prev_close > 0 THEN adj_close / prev_close - 1 END AS r
-        FROM p WHERE date > ?""", [*symbols, start, start]).df()
-    market = con.execute("SELECT date, mkt_ret_1d FROM market_daily WHERE date > ? ORDER BY date", [start]).df()
-    wide = stocks.pivot(index="date", columns="symbol", values="r") if not stocks.empty else pd.DataFrame()
-    dates = pd.Index(market["date"])
-    return {"returns": wide.reindex(dates), "market": market.set_index("date")["mkt_ret_1d"],
-            "as_of": market["date"].max()}
+    return exposure_returns(con, symbols, sessions=SESSIONS)      # moved to quant_research (Risk Engine uses it)
 
 
 def returns(reader: Reader, symbols: tuple[str, ...]) -> ReadResult:
@@ -72,7 +58,7 @@ def paper_weights(reader: Reader) -> ReadResult:
         has = con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'paper_positions'").fetchone()[0]
         if not has:
             return None
-        from stock_ui.research_data import current_paper_date
+        from quant_research.paper_state import current_paper_date
         current = current_paper_date(con)
         if current is None:
             return {}

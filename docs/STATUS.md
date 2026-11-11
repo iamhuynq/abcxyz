@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-10. Update this file at the end of every task.
+Last updated: 2026-11-11. Update this file at the end of every task.
 
 ## Data
 
@@ -133,8 +133,21 @@ Registry). Summary:
   - raw files are never replaced;
   - 200 stored random controls with an exceedance p for new econ and portfolio runs; the paper portfolio
     keeps its pre-registered 20 and adds a 200-control diagnostic.
-  - Backlog: Retry-After as an HTTP date; a BY column next to BH; an `adj_ratio` overlap audit; a backup
-    and restore runbook; a vendor-schema canary.
+  - Backlog: Retry-After as an HTTP date; an `adj_ratio` overlap audit; a backup and restore runbook
+    (the BY column and the vendor-schema canary are done, below).
+- Post-merge checklist (external, 2026-11-11): checked on `730464a`. 406 tests pass, the raw store never
+  exposes partial files, and the mask audit already has provenance. Its P2 items A and B were done (plan
+  `contract-and-fdr-plan.md`, branch `contract-and-fdr`, not pushed):
+  - payload contracts: `fireant validate` checks the latest raw files and stops `daily.sh` on a contract
+    error (`--no-contract` skips the check); `fireant contract scan` over all 26,428 raw files finds 0
+    errors;
+  - BY q-values: `hypothesis_q.q_by` and `quant audit fdr`. Four of the 13 open interaction candidates
+    (foreign_flow-breadth, liquidity-liquidity, order_flow-foreign, reversal_1w-liquidity) pass BH but not
+    BY. This is descriptive: the registry is unchanged.
+  - Not done: cost model and historical limit bands (no source for historical bands yet).
+- Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
+  `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
+  (keep or delete) is the user's call.
 - Next from `project-review-vn-stock-quant-1.md` (agreed order 2026-10-08):
   1. Research Registry: done.
   2. Factor Engine: done (f1, 9 factors; no Value / Quality without fundamentals).

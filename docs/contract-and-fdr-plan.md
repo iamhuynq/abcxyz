@@ -186,3 +186,15 @@ without c(m), and the link through transitions.
   - P4b-G2 and P6-B1 had already failed on other grounds.
   - Nothing changes in the registry. Whether to note BY in a future pre-registration of the interaction
     themes is the user's decision.
+
+### CI fix: lock released before the run record ends
+
+The first CI run of the branch failed `tests/ui/test_tasks.py::test_takes_over_a_stale_lock`. The code at
+fault was already on `main`, outside this branch's changes.
+- The cause: `stock_ui/task_runner.py` saved the final run record (`ok`) first, and released the pipeline
+  lock afterwards, in `finally`. A reader could see `ok` while the lock still existed.
+- The slow CI runner hit that window. Reproduced locally by delaying `locks.release` by 1.5 s: 3 of the 13
+  task tests failed.
+- Fix: release the lock first, then save the final record. Until that save, the record still shows the run
+  as running, so no other task can start in between.
+- With the same delay, all 13 tests pass. Full suite: 435 passed.

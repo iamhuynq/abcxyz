@@ -145,6 +145,8 @@ Registry). Summary:
     (foreign_flow-breadth, liquidity-liquidity, order_flow-foreign, reversal_1w-liquidity) pass BH but not
     BY. This is descriptive: the registry is unchanged.
   - Not done: cost model and historical limit bands (no source for historical bands yet).
+  - CI fix on the branch: the UI task runner now releases the pipeline lock before it marks a run ended
+    (a race already on `main`, hit by the slow CI runner).
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

@@ -286,6 +286,18 @@ def cmd_audit_masks() -> int:
     return 0
 
 
+def cmd_audit_fdr() -> int:
+    from quant_research.fdr_audit import render
+    now = datetime.now(VN_TZ).replace(microsecond=0)
+    store = _store()
+    try:
+        text = render(store, now)
+    finally:
+        store.close()
+    print(f"Multiple-testing audit (descriptive, not logged): {_write_report(f'audit-fdr-{now:%Y%m%dT%H%M%S}', text)}")
+    return 0
+
+
 def cmd_audit() -> int:
     from quant_research.audit import render
     warehouse, research = _paths()
@@ -375,8 +387,9 @@ def main(argv: list[str] | None = None) -> int:
     ix.add_argument("interactions_command", choices=("scan",))
     ix.add_argument("--period", default="research", choices=("research", "validation", "holdout", "forward"))
     au = sub.add_parser("audit", help="Data audits (descriptive, not logged)")
-    au.add_argument("audit_command", choices=("pit", "masks"),
-                    help="pit: point-in-time and survivorship audit; masks: outcome-mask sensitivity (research)")
+    au.add_argument("audit_command", choices=("pit", "masks", "fdr"),
+                    help="pit: point-in-time and survivorship audit; masks: outcome-mask sensitivity (research); "
+                         "fdr: BY q-values next to BH")
     fc = sub.add_parser("factors", help="Factor Engine (factor set f1)")
     fc.add_argument("factors_command", choices=("describe",),
                     help="describe: factor structure on the research period (descriptive, no returns)")
@@ -408,6 +421,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "interactions":
             return cmd_interactions(args.period)
         if args.command == "audit":
+            if args.audit_command == "fdr":
+                return cmd_audit_fdr()
             return cmd_audit_masks() if args.audit_command == "masks" else cmd_audit()
         if args.command == "factors":
             return cmd_factors_describe()

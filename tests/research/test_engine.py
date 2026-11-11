@@ -10,7 +10,7 @@ from quant_research.engine import run_pattern, run_scan
 from quant_research.patterns import LIBRARY, Pattern
 from quant_research.report import render_pattern_batch, render_scan
 from quant_research.results import HoldoutLockedError, ResearchParams, ResultsStore
-from quant_research.stats import benjamini_hochberg
+from quant_research.stats import benjamini_hochberg, benjamini_yekutieli
 from tests.research.synthetic import build_synthetic_warehouse
 from tests.research.synthetic_research import build_research_db
 
@@ -99,6 +99,10 @@ def test_q_values_match_python_bh_and_exclude_invalid_runs(store):
     expected = dict(zip([l for l, _ in logged], benjamini_hochberg([p for _, p in logged])))
     assert store.q_values(a) == pytest.approx(expected)
     assert store.q_values(b) == {}
+
+    by = dict(store.con.execute("SELECT label, q_by FROM hypothesis_q").fetchall())
+    assert by == pytest.approx(dict(zip([l for l, _ in logged], benjamini_yekutieli([p for _, p in logged]))))
+    assert all(by[label] >= q for label, q in expected.items())
 
 
 def test_scan_ranks_the_signal_feature_and_not_the_noise(store):

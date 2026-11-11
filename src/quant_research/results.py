@@ -55,17 +55,23 @@ CREATE TABLE IF NOT EXISTS scan_stats (
 CREATE TABLE IF NOT EXISTS hypothesis_log (
     run_id VARCHAR NOT NULL, label VARCHAR NOT NULL, period VARCHAR NOT NULL, p_value DOUBLE,
     logged_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (run_id, label));
--- BH q-values over every test of every valid run, recomputed on each read.
+-- BH q-values over every test of every valid run, recomputed on each read. q_by is the Benjamini-Yekutieli
+-- q (BH times c(m) = 1 + 1/2 + ... + 1/m, capped at 1): a diagnostic valid under any dependence. Decisions
+-- use q_value.
 CREATE OR REPLACE VIEW hypothesis_q AS
 WITH h AS (
     SELECT h.*, r.kind, r.pattern_name FROM hypothesis_log h JOIN research_runs r USING (run_id)
     WHERE r.status = 'ok' AND h.p_value IS NOT NULL
 ), ranked AS (
     SELECT *, row_number() OVER (ORDER BY p_value, run_id, label) AS rk, count(*) OVER () AS m FROM h
+), adjusted AS (
+    SELECT *, min(p_value * m / rk) OVER (ORDER BY rk DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bh,
+           sum(1.0 / rk) OVER () AS c_m
+    FROM ranked
 )
 SELECT run_id, label, period, kind, pattern_name, p_value, rk, m,
-       least(1.0, min(p_value * m / rk) OVER (ORDER BY rk DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS q_value
-FROM ranked;
+       least(1.0, bh) AS q_value, least(1.0, bh * c_m) AS q_by
+FROM adjusted;
 """
 
 

@@ -31,7 +31,10 @@ def render(store: ResultsStore, now: datetime) -> str:
              "Descriptive (docs/contract-and-fdr-plan.md, part B). Decisions use the BH q (`q_value`); BY is a "
              "diagnostic valid under any dependence between tests. A finding that passes BH but not BY is not "
              "robust to arbitrary dependence; its registry state does not change here. Nothing is logged.", "",
-             f"- Family: every logged test of every valid run, m = {m or 0:,}; c(m) = {c_m or 0:.3f}.",
+             f"- Family: every logged test of every valid run, m = {m or 0:,}; c(m) = {c_m or 0:.3f}. This is the "
+             "global exploratory family of the whole research log (patterns, scans, cross, interaction and "
+             "portfolio tests). It is not a pre-registered family: a pre-registration declares its own family "
+             "before the run, and families are never split after the fact to improve q-values.",
              f"- Tests with BH q < {Q_MAX}: {len(tests):,}; of these, BY q < {Q_MAX}: {survive:,}.", "",
              f"## 1. Tests with BH q < {Q_MAX}", "",
              "| run | label | kind | pattern | period | p | q BH | q BY | passes BY |", "|---|---|---|---|---|---|---|---|---|"]
@@ -44,18 +47,24 @@ def render(store: ResultsStore, now: datetime) -> str:
             SELECT s.hypothesis_id, r.run_id FROM hypothesis_status s
             JOIN research_runs r ON r.pattern_name = s.pattern AND r.pattern_name IS NOT NULL
         )
-        SELECT s.hypothesis_id, s.family, s.status, coalesce(s.decision, '-'), count(DISTINCT q.run_id),
-               arg_min(q.label, q.q_value), min(q.q_value), arg_min(q.q_by, q.q_value)
-        FROM hypothesis_status s
-        LEFT JOIN links l USING (hypothesis_id)
-        LEFT JOIN hypothesis_q q ON q.run_id = l.run_id
-             AND (s.family <> 'interaction' OR q.label = 'ix_' || replace(substr(s.hypothesis_id, 7), '-', '_'))
-        GROUP BY ALL ORDER BY s.hypothesis_id""").fetchall()
+        , own AS (   -- the tests of each hypothesis, ranked: smallest BH q, then run, then label (one row)
+            SELECT s.hypothesis_id, s.family, s.status, coalesce(s.decision, '-') AS decision,
+                   q.run_id, q.label, q.q_value, q.q_by,
+                   count(DISTINCT q.run_id) OVER (PARTITION BY s.hypothesis_id) AS n_runs,
+                   row_number() OVER (PARTITION BY s.hypothesis_id
+                                      ORDER BY q.q_value NULLS LAST, q.run_id, q.label) AS pick
+            FROM hypothesis_status s
+            LEFT JOIN links l USING (hypothesis_id)
+            LEFT JOIN hypothesis_q q ON q.run_id = l.run_id
+                 AND (s.family <> 'interaction' OR q.label = 'ix_' || replace(substr(s.hypothesis_id, 7), '-', '_'))
+        )
+        SELECT hypothesis_id, family, status, decision, n_runs, label, q_value, q_by
+        FROM own WHERE pick = 1 ORDER BY hypothesis_id""").fetchall()
     lines += ["", "## 2. Registry hypotheses", "",
               "The tests of a hypothesis: for an interaction (`P7-IX-<factor>-<dimension>`), its own test "
               "`ix_<factor>_<dimension>` of the shared scan run; otherwise every logged test of its own runs (those "
               "`quant registry show` lists: runs named in its transitions, or runs of its pattern), and the table "
-              "shows the one with the smallest BH q. A hypothesis without logged tests shows `-`. The recorded "
+              "shows the one with the smallest BH q (ties: first by run, then label). A hypothesis without logged tests shows `-`. The recorded "
               "decision used its own pre-declared rule, which this table does not re-apply.", "",
               "| hypothesis | family | state | decision | runs with tests | test | q BH | q BY | fails BY at 0.05 |",
               "|---|---|---|---|---|---|---|---|---|"]

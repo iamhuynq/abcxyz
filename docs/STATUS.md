@@ -147,6 +147,8 @@ Registry). Summary:
   - Not done: cost model and historical limit bands (no source for historical bands yet).
   - CI fix on the branch: the UI task runner now releases the pipeline lock before it marks a run ended
     (a race already on `main`, hit by the slow CI runner).
+  - PR #5 review fixes (same branch): contract dates must really parse, the FDR report picks one row per
+    hypothesis and names the global family, and a contract-failure runbook is in `README.md`. 451 tests pass.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

@@ -163,10 +163,10 @@ Registry). Summary:
     lists invalid runs and their re-runs: all 39 were re-run;
   - provenance records library versions; a reproducibility test runs the same build and experiment twice.
     Floats agree within 1e-9 (largest difference seen: 2.6e-13);
-  - **open, owner decision (H-2):** decile patterns have no tie-break. `momentum10_d10` (P3-C2, failed) varies
-    by 74 rows between runs. order_imbalance has no ambiguous date. Proposed fix: `ORDER BY feature, symbol` in
-    `patterns.py` and `backtest/data.py`;
-  - 474 tests pass; 19 mutations, all caught; `results.duckdb` and the registry are unchanged.
+  - fixed H-2 (owner approved): decile selections break ties by symbol (`patterns.py`, `backtest/data.py`).
+    The order_imbalance selections and the frozen strategy's data are identical to before. `momentum10_d10`
+    (P3-C2, failed) is now deterministic; it varied by 74 rows between runs;
+  - 476 tests pass; 21 mutations, all caught; `results.duckdb` and the registry are unchanged.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

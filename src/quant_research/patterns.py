@@ -34,7 +34,7 @@ class Pattern:
             return f"SELECT * FROM {table} WHERE {universe_sql} AND {row_filter} AND ({self.where})"
         f = self.decile_of
         return f"""SELECT * EXCLUDE (_decile, _n) FROM (
-            SELECT *, ntile(10) OVER (PARTITION BY date ORDER BY {f}) AS _decile,
+            SELECT *, ntile(10) OVER (PARTITION BY date ORDER BY {f}, symbol) AS _decile,   -- ties: by symbol
                    count(*) OVER (PARTITION BY date) AS _n
             FROM {table}
             WHERE {universe_sql} AND {row_filter} AND {f} IS NOT NULL AND isfinite({f}))

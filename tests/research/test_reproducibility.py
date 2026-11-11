@@ -10,13 +10,13 @@ comparison and decile scan twice on the same research database. Every stored out
   at most 3.4e-16 in the build and 2.6e-13 in scan IC statistics; everything else was bit-identical.
 - Excluded on purpose: run ids, created / logged timestamps and build timestamps (they name the run, not
   its result), and the build duration.
-- Known exception: a decile pattern whose feature has ties at the decile boundary (`patterns.py` ntile
-  without a tie-break); see finding H-2 in docs/research-integrity.md.
+- Decile selections break ties by symbol (finding H-2 in docs/research-integrity.md); the last two tests check
+  it on a fixture whose tie straddles the decile boundary, under several physical row orders.
 
 Run it: `uv run pytest tests/research/test_reproducibility.py -q`.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -92,3 +92,47 @@ def test_provenance_records_the_environment(tmp_path):
         p = collect(store.con, research_code_hash())
     assert p["env"] == environment()
     assert environment().startswith("python 3.") and "duckdb " in environment() and "numpy " in environment()
+
+
+# 40 stocks on one date; S35..S39 share the top value, so a tie straddles the top-decile boundary (4 slots).
+TIES_SQL = """
+CREATE SCHEMA IF NOT EXISTS {s};
+CREATE TABLE {s}.feature_target AS
+SELECT 'S' || lpad(i::VARCHAR, 2, '0') AS symbol, DATE '2020-01-02' AS date, 'research' AS period,
+       TRUE AS is_traded, 2e9 AS adv_value_20, 100 AS session_index, FALSE AS price_jump, FALSE AS bad_source_date,
+       FALSE AS fwd_has_price_jump_20d, FALSE AS entry_blocked, FALSE AS crosses_period,
+       least(i, 35)::DOUBLE AS order_imbalance, least(i, 35)::DOUBLE AS return_10d
+FROM range(40) t(i) ORDER BY {order};
+CREATE TABLE {s}.daily_panel AS SELECT symbol, date, 10.0 AS adj_open, 10.0 AS adj_close, is_traded,
+       FALSE AS open_limit_up, FALSE AS limit_down, price_jump FROM {s}.feature_target;
+CREATE TABLE {s}.stock_features AS SELECT * FROM {s}.feature_target;
+CREATE TABLE {s}.market_daily AS SELECT DATE '2020-01-02' AS date, 1000.0 AS mkt_close, 'Bull' AS market_regime;
+"""
+TOP = {"S36", "S37", "S38", "S39"}       # ties are broken by symbol: the last four of S35..S39
+# Without a tie-break the pick depends on the physical row order: hash order picks another set.
+INSERT_ORDERS = ("i", "i DESC", "hash(i)", "hash(i + 7)")
+
+
+def _ties(schema: str, order: str) -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect()
+    con.execute(TIES_SQL.format(s=schema, order=order))
+    return con
+
+
+def test_decile_patterns_break_ties_by_symbol():
+    from quant_research.patterns import LIBRARY
+    params = ResearchParams(min_stocks_per_date=1)
+    for order in INSERT_ORDERS:
+        con = _ties("rs", order)
+        for name in ("momentum10_d10", "order_imbalance_d10"):
+            sql = LIBRARY[name].source_sql(params.sample_sql(), params.min_stocks_per_date)
+            picks = {s for (s,) in con.execute(f"SELECT symbol FROM ({sql})", ["research"]).fetchall()}
+            assert picks == TOP, (name, order, picks)
+
+
+def test_backtest_signal_decile_breaks_ties_by_symbol():
+    from quant_research.backtest.data import UniverseRule, load_market
+    for order in INSERT_ORDERS:
+        m = load_market(_ties("rs", order), date(2020, 1, 1), date(2020, 1, 31), UniverseRule(min_stocks_per_date=1))
+        chosen = {s for s, v in zip(m.symbols, m.signal[0]) if v == v}
+        assert chosen == TOP, (order, chosen)

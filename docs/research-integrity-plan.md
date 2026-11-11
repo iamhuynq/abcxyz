@@ -92,7 +92,7 @@ use `.get`). The NaN guard affects only future `log_hypothesis` calls.
 ## Result (2026-11-11)
 
 Branch `research-integrity-audit`, based on `pr5-review-fixes` (the PR #5 review commit, which missed the
-merge; it goes in its own PR first). Report: `research-integrity.md`. Full suite: 474 passed (451 before).
+merge; it goes in its own PR first). Report: `research-integrity.md`. Full suite: 476 passed (451 before).
 `results.duckdb` and the registry are unchanged (row counts of every table, run states and hypothesis states
 compared before and after).
 
@@ -121,14 +121,18 @@ Found during the audit, not in the plan:
     0.05.
 - **H-1.** Floats are not bit-identical between runs; the largest relative difference is 2.6e-13. A comparison
   policy is written down and tested.
-- **H-2.** Decile patterns have no tie-break. `momentum10_d10` varies by 74 rows from run to run. This is left
-  open for the owner's decision.
+- **H-2.** Decile selections had no tie-break. `momentum10_d10` varied by 74 rows from run to run.
+  - The owner approved the fix: `ORDER BY feature, symbol` in `patterns.py` and `backtest/data.py`.
+  - The order_imbalance selections and the backtest loader arrays are identical to before.
+  - momentum10_d10 is now deterministic.
 
-Mutation check: 19 planted defects, all caught by an assertion:
+Mutation check: 21 planted defects, all caught by an assertion:
 - 9 look-ahead, label and period;
 - 4 FDR family;
 - 2 FDR report;
 - 3 reproducibility;
-- 1 lift masks.
+- 1 lift masks;
+- 2 decile tie-breaks. The first fixture let both tie-break mutations survive, because a small single-thread
+  sort happened to pick the right set; the fixture now loads several physical row orders.
 
 `quant audit fdr` was re-run on the real store: `data/reports/research/audit-fdr-20261111T142439.md`.

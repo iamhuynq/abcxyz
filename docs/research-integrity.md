@@ -11,11 +11,11 @@ The pipeline holds its main invariants, and they are now enforced by tests acros
 - chronological periods with purge masks;
 - one global FDR family that can be traced row by row.
 
-The audit found three defects, all Low:
-- **F-1 (fixed):** the per-horizon mask mode compared different rows on the two sides of a pattern lift.
-- **G-1 (fixed):** a NaN p-value would have entered the FDR family.
-- **H-2 (open, owner decision):** decile patterns break ties in an undefined order, so `momentum10_d10` selects
-  slightly different rows on each run.
+The audit found three defects, all Low and all fixed:
+- **F-1:** the per-horizon mask mode compared different rows on the two sides of a pattern lift.
+- **G-1:** a NaN p-value would have entered the FDR family.
+- **H-2:** decile selections broke ties in an undefined order, so `momentum10_d10` selected slightly different
+  rows on each run. The fix was approved by the owner.
 
 None changes a recorded decision. `results.duckdb` and the registry are unchanged: the same row counts and the
 same states before and after the audit.
@@ -262,7 +262,7 @@ Regression test: test_reproducibility.py (build twice, experiment twice).
 ID: H-2
 Title: Decile selection breaks ties in an undefined order
 Severity: Low
-Status: Open (owner decision: adding a tie-break touches a recorded pattern and the frozen strategy's loader)
+Status: Fixed (owner approved 2026-11-11; the change touches a recorded pattern and the frozen strategy's loader)
 Evidence: patterns.py `ntile(10) OVER (PARTITION BY date ORDER BY {feature})` and backtest/data.py
   `ntile(10) ... ORDER BY sig` have no tie-break (the decile scan has one since PR #3: `ORDER BY f, symbol`).
   - On the real data, a tie straddles the top-decile boundary on 66 of 5,632 dates for return_10d, and on 0 of
@@ -274,9 +274,18 @@ Affected components: momentum10_d10 (P3-C2, failed; no forward use). The frozen 
 Potential impact: a re-run of momentum10_d10 moves its lift in the fifth decimal (0.00934 versus 0.00933 at 20
   sessions); its decision does not change.
 Reproduction or verification steps: run momentum10_d10's source SQL three times and compare the row sets.
-Remediation (proposed): add `, symbol` to both ORDER BY clauses. It changes no recorded order_imbalance
-  selection (0 ambiguous dates) and makes momentum10_d10 deterministic.
-Regression test: to add with the fix (two identical runs give the same rows on a fixture with ties).
+Remediation: `, symbol` added to both ORDER BY clauses. Verified on the real data:
+  - order_imbalance_d10 and order_imbalance_d10_no_limit select the same rows as before in all four periods;
+  - every array of the backtest loader (frozen strategy rule, whole history) is identical, so the paper
+    portfolio is unaffected;
+  - momentum10_d10 moves by 70 / 10 / 2 rows (research / validation / holdout; symmetric difference with one
+    earlier draw) and is now the same on every run.
+  Recorded momentum10_d10 runs keep their stored numbers. A re-run would differ in the fifth decimal of the
+  lift. Pattern versions are unchanged: the version hashes the condition, and the tie order was never part of
+  it.
+Regression test: test_reproducibility.py::test_decile_patterns_break_ties_by_symbol and
+  ::test_backtest_signal_decile_breaks_ties_by_symbol (a tie straddles the decile boundary, under four physical
+  row orders; without the tie-break, hash order picks another set).
 ```
 
 ```text
@@ -370,10 +379,10 @@ Regression test: test_events.py (each event equals its condition; point in time)
 | `test_outcome_masks.py::test_pattern_lift_compares_the_same_rows_on_both_sides` | The lift's denominators match in both mask modes (F-1) |
 | `test_fdr_family.py` | Family membership and p-value edge cases: NaN, NULL, out of range, re-log, ties, m = 1, run status, trace (G-1) |
 | `test_fdr_audit.py::test_report_lists_tests_outside_the_family_*` | Every invalid run is listed with its re-run (G-2) |
-| `test_reproducibility.py` | Two builds and two experiments agree under the stated policy; provenance has the environment (H-1, H-3) |
+| `test_reproducibility.py` | Two builds and two experiments agree under the stated policy; provenance has the environment; decile ties are broken by symbol (H-1, H-2, H-3) |
 | Existing: `test_feature_build.py`, `test_factors.py`, `test_regimes.py`, `test_events.py`, `test_costs.py`, `test_cross.py`, `test_groups.py`, `tests/backtest/*` | Independent reference implementations and per-table look-ahead tests |
 
-Every new test was mutation-checked: 19 planted defects, all caught by an assertion, not by an error.
+Every new test was mutation-checked: 21 planted defects, all caught by an assertion, not by an error.
 
 ## 6. Known limitations
 
@@ -391,7 +400,6 @@ Every new test was mutation-checked: 19 planted defects, all caught by an assert
 
 ## 7. Follow-up (deferred)
 
-- H-2 tie-break, if the owner accepts it.
 - Group C backlog: Retry-After as an HTTP date, the `adj_ratio` overlap audit, a backup and restore runbook.
 - An artifact table keyed by `run_id` (report paths), if reports need to be found from a run.
 - A source for historical exchange and industry membership, if one appears.

@@ -68,7 +68,7 @@ def load_market(con: duckdb.DuckDBPyConnection, start: date, end: date, rule: Un
         ),
         ranked AS (
             SELECT *, CASE WHEN in_universe AND sig IS NOT NULL AND isfinite(sig) THEN
-                        ntile(10) OVER (PARTITION BY date, (in_universe AND sig IS NOT NULL AND isfinite(sig)) ORDER BY sig)
+                        ntile(10) OVER (PARTITION BY date, (in_universe AND sig IS NOT NULL AND isfinite(sig)) ORDER BY sig, symbol)
                       END AS decile,
                    count(*) FILTER (WHERE in_universe AND sig IS NOT NULL AND isfinite(sig)) OVER (PARTITION BY date) AS n_ranked
             FROM base

@@ -124,3 +124,11 @@ def test_invalidation_records_when_and_why_and_keeps_the_tests(store):
     assert store.con.execute("SELECT * FROM run_invalidations").fetchall() == [("R", NOW, "code defect: wrong join")]
     assert store.con.execute("SELECT count(*) FROM hypothesis_log WHERE run_id = 'R'").fetchone()[0] == 1
     assert _q(store) == {}
+
+
+def test_an_invalid_run_cannot_be_invalidated_again(store):
+    _run(store, "R")
+    assert store.invalidate("R", "first: wrong join", NOW) == 1
+    assert store.invalidate("R", "second: changed my mind", NOW) == 0
+    assert store.con.execute("SELECT invalid_reason FROM research_runs").fetchone()[0] == "first: wrong join"
+    assert store.con.execute("SELECT count(*) FROM run_invalidations").fetchone()[0] == 1

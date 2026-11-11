@@ -90,7 +90,16 @@ def test_provenance_records_the_environment(tmp_path):
     build_research_db(research)
     with ResultsStore(tmp_path / "results.duckdb", research) as store:
         p = collect(store.con, research_code_hash())
-    assert p["env"] == environment() and p["selection"] == SELECTION == "decile ties broken by symbol"
+    assert p["env"] == environment() and p["selection"] == SELECTION == "deciles v2: ties by symbol"
+
+
+def test_selection_provenance_names_the_tie_break_both_selections_use():
+    from quant_research.backtest import data
+    from quant_research.patterns import DECILE_TIE_BREAK, LIBRARY
+    sql = LIBRARY["momentum10_d10"].source_sql("TRUE", 1)
+    assert f"ORDER BY return_10d, {DECILE_TIE_BREAK})" in sql
+    assert f"ORDER BY sig, {{DECILE_TIE_BREAK}})" in Path(data.__file__).read_text()
+    assert SELECTION.endswith(f"ties by {DECILE_TIE_BREAK}")
     assert environment().startswith("python 3.") and "duckdb " in environment() and "numpy " in environment()
 
 

@@ -271,9 +271,10 @@ class ResultsStore:
                          [run_id, label, period, p_value, now])
 
     def invalidate(self, run_id: str, reason: str, now: datetime | None = None) -> int:
-        """Mark a run invalid (see the invalidation policy in the module docstring) and record when."""
-        cur = self.con.execute("UPDATE research_runs SET status = 'invalid', invalid_reason = ? WHERE run_id = ?",
-                               [reason, run_id])
+        """Mark a run invalid (see the invalidation policy in the module docstring) and record when. Returns 0 for
+        an unknown run and for a run that is already invalid (its first reason is kept, nothing is recorded)."""
+        cur = self.con.execute("""UPDATE research_runs SET status = 'invalid', invalid_reason = ?
+                                  WHERE run_id = ? AND status <> 'invalid'""", [reason, run_id])  # reason kept once set
         changed = cur.fetchone()[0]
         if changed:
             self._open_runs.discard(run_id)                          # an invalid run is closed: never 'failed' later

@@ -123,10 +123,10 @@ def test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run(sto
             "runs passing at 0.05: BH 1 in the family, 0 with all attempts; BY 0 and 0. Tests whose verdict differs "
             "between the two: 1.") in text
     assert "| 20261002T100000-scan-features-research | t0 | 0.04 | 0.06 | 0.06 | 0.147 |" in text
-    assert "Invalidated runs with logged tests: 2; without a later `ok` run of the same name: 1." in text
-    assert ("| 20261001T100000-scan-features-research | 2 | 1 | 0.01 | 20261002T100000-scan-features-research | 1 | "
-            "0.02 |") in text
-    assert "| 20261001T100000-cross-h2-research | 1 | 1 | 0.04 | none | - | - |" in text
+    assert "Invalidated runs with logged tests: 2; without a later `ok` run of the same experiment: 1." in text
+    assert ("| 20261001T100000-scan-features-research | 2 | 1 | 0.01 | 20261002T100000-scan-features-research | "
+            "same experiment | 1 | 0.02 |") in text
+    assert "| 20261001T100000-cross-h2-research | 1 | 1 | 0.04 | none | - | - | - |" in text
     assert "| 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |" in text.split("## 4.")[1]     # the ok run stored no provenance
 
 
@@ -144,3 +144,33 @@ def test_hypothesis_rows_survive_join_fan_out(store):
     assert len(rows) == 1 and "| 2 | z |" in rows[0]                 # 2 distinct runs; tie -> run X1, then label
     none = [line for line in text.splitlines() if line.startswith("| P3-C2 |")]
     assert len(none) == 1 and none[0].endswith("| 0 | - | - | - |  |")
+
+
+def _run(store, run_id, params, created, status="ok", version="v1", p_values=(0.01,)):
+    store.con.execute("INSERT INTO research_runs VALUES (?, 'cross', 'h2', ?, 'research', ?, NULL, 'x', ?, ?, NULL)",
+                      [run_id, version, params, created, status])
+    for i, p in enumerate(p_values):
+        store.con.execute("INSERT INTO hypothesis_log VALUES (?, ?, 'research', ?, ?)", [run_id, f"t{i}", p, NOW])
+
+
+def test_a_rerun_must_be_the_same_experiment_not_just_the_same_name(store):
+    """Same run name, other parameters: not a successor. Only a data or code identifier differs: a successor."""
+    from datetime import timedelta
+    old = '{"horizons": [5], "extra": {"cross_build_id": "b1", "cross_code_hash": "c1"}, "provenance": {"x": 1}}'
+    other = '{"horizons": [10], "extra": {"cross_build_id": "b2", "cross_code_hash": "c2"}}'
+    rebuilt = '{"horizons": [5], "extra": {"cross_build_id": "b3", "cross_code_hash": "c3"}}'
+    _run(store, "20261001T100000-cross-h2-research", old, NOW, status="invalid")
+    _run(store, "20261002T100000-cross-h2-research", other, NOW + timedelta(days=1))
+    _run(store, "20261003T100000-cross-h2-research", rebuilt, NOW + timedelta(days=2))
+    _run(store, "20261001T090000-cross-h3-research", old, NOW, status="invalid")
+    _run(store, "20261002T090000-cross-h3-research", other, NOW + timedelta(days=1))
+    _run(store, "20261001T080000-cross-h4-research", old, NOW, status="invalid")
+    _run(store, "20261002T080000-cross-h4-research", old, NOW + timedelta(days=1), version="v2")
+    text = render(store, NOW).split("## 3.")[1]
+    assert "without a later `ok` run of the same experiment: 2." in text
+    assert ("| 20261001T100000-cross-h2-research | 1 | 1 | 0.01 | 20261003T100000-cross-h2-research | "
+            "same experiment |") in text
+    assert ("| 20261001T090000-cross-h3-research | 1 | 1 | 0.01 | 20261002T090000-cross-h3-research | "
+            "parameters differ: horizons |") in text
+    assert ("| 20261001T080000-cross-h4-research | 1 | 1 | 0.01 | 20261002T080000-cross-h4-research | "
+            "definition changed: version |") in text

@@ -11,6 +11,8 @@ from datetime import date
 import duckdb
 import numpy as np
 
+from quant_research.patterns import DECILE_TIE_BREAK
+
 
 @dataclass(frozen=True)
 class UniverseRule:
@@ -68,7 +70,7 @@ def load_market(con: duckdb.DuckDBPyConnection, start: date, end: date, rule: Un
         ),
         ranked AS (
             SELECT *, CASE WHEN in_universe AND sig IS NOT NULL AND isfinite(sig) THEN
-                        ntile(10) OVER (PARTITION BY date, (in_universe AND sig IS NOT NULL AND isfinite(sig)) ORDER BY sig, symbol)
+                        ntile(10) OVER (PARTITION BY date, (in_universe AND sig IS NOT NULL AND isfinite(sig)) ORDER BY sig, {DECILE_TIE_BREAK})
                       END AS decile,
                    count(*) FILTER (WHERE in_universe AND sig IS NOT NULL AND isfinite(sig)) OVER (PARTITION BY date) AS n_ranked
             FROM base

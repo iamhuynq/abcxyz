@@ -177,6 +177,12 @@ Registry). Summary:
     - tests for join fan-out, cross-sectional tables and a mid-series gap;
     - report wording qualified; accepted date formats documented;
     - 480 tests pass; 28 mutations in all, every one caught.
+  - Second review (head `90cbaf8`), same branch:
+    - an invalidated run's successor must be the same experiment, not only the same name. 37 of 39 match;
+      2 cross tests were re-run with a redefined test, and the report now says so;
+    - an invalid run cannot be invalidated again;
+    - the decile tie-break is one constant, shared by both selections and by provenance;
+    - 483 tests pass; 34 mutations in all, every one caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

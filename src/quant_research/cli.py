@@ -325,7 +325,12 @@ def cmd_runs(invalidate: str | None, reason: str | None) -> int:
                 print("--reason is required to invalidate a run", file=sys.stderr)
                 return 2
             if not store.invalidate(invalidate, reason):
-                print(f"No run {invalidate}; nothing changed.", file=sys.stderr)
+                row = store.con.execute("SELECT status, invalid_reason FROM research_runs WHERE run_id = ?",
+                                        [invalidate]).fetchone()
+                if row and row[0] == "invalid":
+                    print(f"Run {invalidate} is already invalid; its reason is kept: {row[1]}", file=sys.stderr)
+                else:
+                    print(f"No run {invalidate}; nothing changed.", file=sys.stderr)
                 return 1
             print(f"Run {invalidate} marked invalid (kept in the log, excluded from q-values).")
             return 0

@@ -179,7 +179,7 @@ A new table fails that test until it is classified.
 | created at | `research_runs.created_at` |
 | artifacts | report paths are printed by each command. Run outputs are tables keyed by `run_id`; there is no artifact table |
 | environment | `params.provenance.env`, new: Python, DuckDB, NumPy, pandas, SciPy and statsmodels versions |
-| selection rule | `params.provenance.selection`, new: implementation rules a pattern version does not hash (decile ties broken by symbol) |
+| selection rule | `params.provenance.selection`, new: implementation rules a pattern version does not hash (`deciles v2: ties by symbol`, built from `patterns.DECILE_TIE_BREAK`) |
 
 **Boundary.** The fixture below shows that the code paths are deterministic on fixed inputs. It does not
 re-run historical experiments on the production data; their reproducibility rests on the recorded provenance.
@@ -255,17 +255,30 @@ Affected components: ResultsStore.invalidate, hypothesis_q.
 Potential impact: a re-run made because a first result looked wrong would be a fork in the analysis that the
   operational family does not price. The policy, the recorded reasons, the all-attempts comparison and the
   before / after table are the controls.
-Reproduction or verification steps: `uv run quant audit fdr`, section 3 (audit-fdr-20261111T150337.md).
+Reproduction or verification steps: `uv run quant audit fdr`, section 3 (audit-fdr-20261111T152351.md).
 Remediation:
   - Policy (results.py docstring, `quant runs --invalidate` help): invalidate only for a defect established
     independently of the result, named in the reason, never because a result is unwelcome.
-  - Every invalidation from 2026-11-11 on is also written to the append-only table `run_invalidations`, with
-    its time and reason. Earlier ones have no time. The actor is not recorded (single-user system). The
-    successor is found by run name, because it does not exist yet when a run is invalidated.
+  - Every invalidation from 2026-11-11 on is also written to the table `run_invalidations`, with its time and
+    reason. Earlier ones have no time. The actor is not recorded (single-user system).
+    - A run that is already invalid cannot be invalidated again: its first reason is kept and no second record
+      is written.
+    - Append-only is a convention: DuckDB has no per-table write permissions.
+    - The policy itself is procedural; code cannot check that a reason is independent of the result.
+  - The successor is matched by experiment identity, not by name (PR #7 second review): same kind, pattern,
+    period, pattern version and stored parameters. Provenance and data or code identifiers (`*_build_id`,
+    `*_code_hash`) may differ, since a re-run after a fix uses new code or a rebuilt input. It is found at report
+    time, because it does not exist yet when a run is invalidated.
+    - On the real store, 37 of the 39 invalidated runs have a re-run of the same experiment.
+    - The other 2 (`cross-h2_large_to_small`, `cross-leadlag_persistence`) were re-run with a redefined test
+      (version changed, as their reasons state). The report says so and counts them as without a matching
+      re-run.
   - FDR report section 3: the all-attempts family next to the operational one, the tests whose verdict
     differs, and each invalidated run's tests at p < 0.05 and min p, before and after its re-run.
 Regression test: test_fdr_audit.py::test_report_lists_tests_outside_the_family_and_rerun_of_each_invalid_run,
-  test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests
+  ::test_a_rerun_must_be_the_same_experiment_not_just_the_same_name,
+  test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests,
+  ::test_an_invalid_run_cannot_be_invalidated_again
 ```
 
 ```text
@@ -310,7 +323,10 @@ Remediation: `, symbol` added to both ORDER BY clauses. Verified on the real dat
   Versioning (PR #7 review): `pattern_definitions.version` identifies the condition, and the stored
   `code_hash` identifies the implementation (it changed with this fix). Putting the tie rule into the version
   hash would re-version three recorded patterns and break the frozen registry links. Instead, new runs record
-  `selection: "decile ties broken by symbol"` in their provenance.
+  `selection: "deciles v2: ties by symbol"` in their provenance (v1 = physical row order, before this fix).
+  - That string is built from the constant `patterns.DECILE_TIE_BREAK`, which also builds both ORDER BY
+    clauses.
+  - A test checks that both selections use the tie-break that provenance names.
 Regression test: test_reproducibility.py::test_decile_patterns_break_ties_by_symbol and
   ::test_backtest_signal_decile_breaks_ties_by_symbol (a tie straddles the decile boundary, under four physical
   row orders; without the tie-break, hash order picks another set).
@@ -426,10 +442,12 @@ Regression test: test_events.py (each event equals its condition; point in time)
 | `test_integrity.py::test_one_symbol_after_a_cutoff_moves_cross_sections_only_from_then_on` | Cross-sectional tables (factors, regimes) may move on the same dates as a change, never on earlier ones |
 | `test_integrity.py::test_outcome_windows_skip_a_missing_session_inside_a_series` | A gap inside a series is skipped: windows count the symbol's own sessions |
 | `test_fdr_audit.py::test_hypothesis_rows_survive_join_fan_out` | One row per hypothesis, distinct run count and a fixed pick when links, labels and ties multiply |
-| `test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests` | An invalidation keeps the run's tests and records its time and reason |
+| `test_fdr_family.py::test_invalidation_records_when_and_why_and_keeps_the_tests`, `::test_an_invalid_run_cannot_be_invalidated_again` | An invalidation keeps the run's tests, records its time and reason once, and never overwrites a reason |
+| `test_fdr_audit.py::test_a_rerun_must_be_the_same_experiment_not_just_the_same_name` | A successor is the same experiment; a same-name run with other parameters or another version is not |
+| `test_reproducibility.py::test_selection_provenance_names_the_tie_break_both_selections_use` | The selection rule in provenance matches the SQL of both decile selections |
 | Existing: `test_feature_build.py`, `test_factors.py`, `test_regimes.py`, `test_events.py`, `test_costs.py`, `test_cross.py`, `test_groups.py`, `tests/backtest/*` | Independent reference implementations and per-table look-ahead tests |
 
-Every new test was mutation-checked: 28 planted defects, all caught by an assertion, not by an error.
+Every new test was mutation-checked: 34 planted defects, all caught by an assertion, not by an error.
 
 ## 6. Known limitations
 

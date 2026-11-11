@@ -7,6 +7,10 @@ new version and old results stay attributable to the old definition.
 import hashlib
 from dataclasses import dataclass
 
+# Second sort key of every decile selection (here and in backtest/data.py): ties at a decile boundary go by symbol,
+# so a selection never depends on physical row order (docs/research-integrity.md, H-2). Recorded in provenance.
+DECILE_TIE_BREAK = "symbol"
+
 
 @dataclass(frozen=True)
 class Pattern:
@@ -34,7 +38,7 @@ class Pattern:
             return f"SELECT * FROM {table} WHERE {universe_sql} AND {row_filter} AND ({self.where})"
         f = self.decile_of
         return f"""SELECT * EXCLUDE (_decile, _n) FROM (
-            SELECT *, ntile(10) OVER (PARTITION BY date ORDER BY {f}, symbol) AS _decile,   -- ties: by symbol
+            SELECT *, ntile(10) OVER (PARTITION BY date ORDER BY {f}, {DECILE_TIE_BREAK}) AS _decile,
                    count(*) OVER (PARTITION BY date) AS _n
             FROM {table}
             WHERE {universe_sql} AND {row_filter} AND {f} IS NOT NULL AND isfinite({f}))

@@ -12,6 +12,8 @@ import platform
 import subprocess
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+
+from quant_research.patterns import DECILE_TIE_BREAK
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -31,7 +33,7 @@ def git_info() -> tuple[str, bool | None]:
 
 
 # Implementation rules that a pattern version (a hash of the condition) does not capture. Change with the code.
-SELECTION = "decile ties broken by symbol"      # patterns.py and backtest/data.py, from 2026-11-11 (H-2)
+SELECTION = f"deciles v2: ties by {DECILE_TIE_BREAK}"   # v1 (before 2026-11-11): ties in physical row order (H-2)
 ENV_PACKAGES = ("duckdb", "numpy", "pandas", "scipy", "statsmodels")
 
 

@@ -178,3 +178,29 @@ by position, so a new column would have broken them.
   - a mid-series gap.
 - Mutation check: 7 more, all caught by an assertion. A first mutation for the gap test (keep the zero-price
   row) failed the build with an error instead; it was replaced by a calendar-day outcome window.
+
+## PR #7 second review (external, 2026-11-11, head `90cbaf8`): assessment and plan
+
+| Point | Verified on code and data | Assessment | Action |
+|---|---|---|---|
+| P2 successor found by run name only | Yes. On the real store, 36 of 39 invalid -> successor pairs have the same kind, pattern, period, pattern version and stored parameters (provenance excluded). The other 3 are cross runs. They differ in `cross_build_id` and `cross_code_hash`, which are the fixed rebuild itself. Two of them (`h2_large_to_small`, `leadlag_persistence`) also differ in pattern version: the test was redefined (v2), as their invalidation reasons say. Name-only matching hides that. | Valid | Successor = the earliest later `ok` run with the same experiment identity: kind, pattern name, period, pattern version, and stored parameters without provenance and without data or code identifiers (`*_build_id`, `*_code_hash`). Those identifiers may differ: a re-run after a fix uses new code or a rebuilt input by design. If no run matches, the report shows the earliest same-name `ok` run with the fields that differ ("definition changed: version"; "parameters differ: ..."), and counts it as without a matching re-run. Tests: a same-name run with other parameters is not a successor; a same-name run that differs only in build or code id is. |
+| P2 invalidation policy not enforced; table not protected | Yes, plus a defect: invalidating an already-invalid run is accepted. It overwrites the recorded `invalid_reason` and adds a second `run_invalidations` row. | Policy: accepted limitation (single user). Re-invalidation: fix. | `invalidate` changes only a run that is not yet invalid (returns 0 otherwise; the CLI says "already invalid, reason kept"). Test. Append-only stays a convention: DuckDB has no per-table write permissions, so this is documented. |
+| P3 `SELECTION` is a hand-written string | Yes | Valid | One constant `DECILE_TIE_BREAK = "symbol"` in `patterns.py` builds both ORDER BY clauses (`patterns.py`, `backtest/data.py`). Provenance derives `selection` from it, versioned as `"deciles v2: ties by symbol"`. Test: both SQL texts contain the tie-break that provenance names. |
+
+No change to stored rows. The re-run report is regenerated.
+
+### PR #7 second review fixes: result (2026-11-11)
+
+Done as planned.
+
+- **Successors by experiment identity.**
+  - Real store: 37 of 39 invalidated runs have a re-run of the same experiment. 2 were re-run with a
+    redefined test (version changed), and the report now shows that
+    (`audit-fdr-20261111T152351.md`).
+  - Tests: a same-name run with other parameters is not a successor; a run that differs only in build or code
+    id is; a version change is reported.
+- **Re-invalidation.** It is refused; the first reason is kept, and the CLI prints it.
+- **Selection rule.** `patterns.DECILE_TIE_BREAK` builds both ORDER BY clauses and the provenance string
+  (`deciles v2: ties by symbol`). The SQL text is unchanged, so the selections are unchanged.
+- **Checks.** Mutation check: 6 more, all caught; the two earlier tie-break mutations, retargeted at the
+  constant, are still caught. `results.duckdb` data is unchanged.

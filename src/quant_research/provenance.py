@@ -1,13 +1,16 @@
 """Reproducibility metadata for every run and report (docs/provenance-exposure-plan.md, part 1).
 
 A run is traceable to: git commit (+ whether src/ had uncommitted changes), dataset (warehouse file hash
-recorded by `quant build`), feature build, code hash and the hash of the run configuration.
+recorded by `quant build`), feature build, code hash, the hash of the run configuration and, from 2026-11-11, the
+Python and numerical library versions (`env`). Older runs have no `env`; readers use `.get`.
 """
 
 import hashlib
 import json
+import platform
 import subprocess
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -24,6 +27,21 @@ def git_info() -> tuple[str, bool | None]:
         return sha or "unknown", bool(status.strip())
     except (OSError, subprocess.SubprocessError):
         return "unknown", None
+
+
+ENV_PACKAGES = ("duckdb", "numpy", "pandas", "scipy", "statsmodels")
+
+
+@lru_cache(maxsize=1)
+def environment() -> str:
+    """Python and the libraries that compute results, e.g. 'python 3.12.13, duckdb 1.5.6, numpy 2.5.3, ...'."""
+    parts = [f"python {platform.python_version()}"]
+    for name in ENV_PACKAGES:
+        try:
+            parts.append(f"{name} {version(name)}")
+        except PackageNotFoundError:
+            parts.append(f"{name} unknown")
+    return ", ".join(parts)
 
 
 def config_hash(config_json: str) -> str:
@@ -43,7 +61,8 @@ def collect(con, research_code_hash: str, config_json: str | None = None) -> dic
         row = con.execute("SELECT build_id FROM rs.feature_builds ORDER BY built_at DESC LIMIT 1").fetchone()
         build_id = row[0] if row else None
     out = {"git_sha": sha, "git_dirty": dirty, "warehouse_sha": warehouse_sha, "feature_build_id": build_id,
-           "code_hash": research_code_hash}      # key kept for older runs: it is the research_code_hash
+           "code_hash": research_code_hash,      # key kept for older runs: it is the research_code_hash
+           "env": environment()}
     if config_json is not None:
         out["config_hash"] = config_hash(config_json)
     return out
@@ -55,7 +74,8 @@ def line(p: dict) -> str:
     sha = (p.get("git_sha") or "unknown")[:10]
     wh = (p.get("warehouse_sha") or "unknown")[:12]
     return (f"- Provenance: commit `{sha}`{dirty}, warehouse `{wh}`, feature build `{p.get('feature_build_id')}`, "
-            f"code `{p.get('code_hash')}`" + (f", config `{p['config_hash']}`" if p.get("config_hash") else ""))
+            f"code `{p.get('code_hash')}`" + (f", config `{p['config_hash']}`" if p.get("config_hash") else "")
+            + (f"; {p['env']}" if p.get("env") else ""))
 
 
 def from_runs(con, run_ids: list[str]) -> list[str]:

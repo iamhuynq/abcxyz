@@ -49,6 +49,27 @@ uv run pytest tests/research/test_events.py -q     # one file
 uv run pytest tests/test_jobs.py::test_pagination  # one test
 ```
 
+## When the payload contract fails
+
+`fireant validate` (and so `scripts/daily.sh`, exit 8) stops when a raw FireAnt response breaks its contract
+(`src/fireant_crawler/validate/contract.py`). The "Contract" section of `data/reports/validation-<date>.md`
+names the job, the field, the rule and an example file. It never shows values.
+
+1. Keep the raw file. Raw files are never replaced, and the example path is in the report.
+2. Decide what changed. A schema change means FireAnt renamed, dropped, retyped or added a field, or
+   changed a date format. Bad data means one response is broken. Compare with older files of the same job
+   (`fireant contract scan --job J`).
+3. For a schema change, update the contract, the fixtures in `tests/fixtures/`, and the normalizer if it
+   reads the field. Every field is required today, because all were present in 100% of the rows surveyed.
+   If FireAnt starts omitting a field, the contract needs an explicit optional flag, with a test. Do not
+   just delete the field from the contract.
+4. Run `uv run pytest tests/test_contract.py tests/test_normalize.py -q`.
+5. Run `uv run fireant contract scan --since <first bad fetch date>`, then rerun `scripts/daily.sh`.
+6. Skipping the check is for one day at most, and only after step 2 has decided the data is usable.
+   `scripts/daily.sh` always checks the contract, so run the remaining steps by hand:
+   `uv run fireant validate --no-contract`, then `uv run quant build`, then `uv run quant daily`.
+   Never loosen a contract just to let the daily job pass.
+
 ## Layout
 
 - `src/fireant_crawler/`: API client, whitelist, raw store, DuckDB warehouse, jobs, validation.

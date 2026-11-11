@@ -92,3 +92,13 @@ def test_a_hypothesis_without_a_pattern_is_linked_through_its_transitions(store)
     text = render(store, NOW)
     row = next(line for line in text.splitlines() if line.startswith("| P4-X2 |"))
     assert "| 1 | t0 | 0.001 | 0.001 |" in row
+
+
+def test_tied_q_values_pick_one_row_deterministically(store):
+    # equal p in two runs of the same pattern: equal q; the first run, then the first label, is shown
+    _log(store, "R2", "order_imbalance_d10", [0.001, 0.001], labels=["b", "a"])
+    _log(store, "R1", "order_imbalance_d10", [0.001, 0.9], labels=["z", "y"])
+    text = render(store, NOW)
+    row = next(line for line in text.splitlines() if line.startswith("| P3-C1 |"))
+    assert "| 2 | z | " in row
+    assert "global exploratory family" in text

@@ -119,6 +119,23 @@ def test_bad_date_is_an_error():
     assert check_payload("report_marks", marks) == [Violation("error", "report_marks", "bad_date", "date")]
 
 
+@pytest.mark.parametrize("value", ["2026-02-31", "2026-13-01", "2026-99-99", "2026-11-11T29:00:00",
+                                   "2026-11-11T10:70:00", "2026-11-11T10:00:61", "2026-11-11T00:00:00+25:00",
+                                   "2026-11-11 00:00:00", "2026-11-11T00:00:00+0700"])
+def test_impossible_or_malformed_dates_are_errors(value):
+    marks = copy.deepcopy(_load("timescale_marks_vos.json")[:1])
+    marks[0]["date"] = value
+    assert check_payload("report_marks", marks) == [Violation("error", "report_marks", "bad_date", "date")]
+
+
+@pytest.mark.parametrize("value", ["2026-11-11", "2026-11-11T00:00:00", "2026-11-11T09:15:30.123",
+                                   "2026-11-11T00:00:00Z", "2026-11-11T00:00:00+07:00", "2028-02-29T00:00:00"])
+def test_valid_dates_pass(value):
+    marks = copy.deepcopy(_load("timescale_marks_vos.json")[:1])
+    marks[0]["date"] = value
+    assert check_payload("report_marks", marks) == []
+
+
 def test_unknown_field_is_a_warning_except_for_quotes():
     marks = copy.deepcopy(_load("timescale_marks_vos.json")[:1])
     marks[0]["releaseDate"] = "2026-11-11"

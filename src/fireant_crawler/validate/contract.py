@@ -13,6 +13,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,8 +22,19 @@ from fireant_crawler.store.raw_store import RawStore
 Kind = Literal["number", "integer", "string", "bool", "null"]
 Level = Literal["error", "warning"]
 
-# Plain date or date-time, as FireAnt sends it ("2026-10-01T00:00:00"); `parse_date` accepts all of these.
+# Plain date or date-time, as FireAnt sends it ("2026-10-01T00:00:00"). The regex fixes the shape; the value
+# must then parse with datetime.fromisoformat, as in the normalizer's `parse_date` (no 2026-02-31, no 29:70).
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?")
+
+
+def is_iso_date(value: str) -> bool:
+    if not _ISO_DATE.fullmatch(value):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -130,7 +142,7 @@ def check_payload(name: str, data: Any) -> list[Violation]:
             value = row[key]
             if not _allowed(kind_of(value), spec):
                 found.add(Violation("error", name, "wrong_kind", key))
-            elif spec.date and isinstance(value, str) and not _ISO_DATE.fullmatch(value):
+            elif spec.date and isinstance(value, str) and not is_iso_date(value):
                 found.add(Violation("error", name, "bad_date", key))
         for key in row.keys() - contract.fields.keys():
             found.add(Violation(contract.unknown_level, name, "unknown_field", str(key)))

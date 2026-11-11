@@ -198,3 +198,51 @@ fault was already on `main`, outside this branch's changes.
 - Fix: release the lock first, then save the final record. Until that save, the record still shows the run
   as running, so no other task can start in between.
 - With the same delay, all 13 tests pass. Full suite: 435 passed.
+
+## Review of PR #5 (external, 2026-11-11): assessment and fix plan
+
+Each finding was checked against the code and the real data before this plan.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | The date regex accepts impossible dates | Confirmed: `2026-02-31`, `2026-99-99`, `T29:70:00` and offset `+25:00` all match. The normalizer's `parse_date` rejects each of them, so ingest already fails loudly; the contract should catch them first. | Fix |
+| 2 | No split between required, optional and nullable | Partly. Nullable is already separate (the `null` kind, allowed only where it was seen). Every contracted field was present in 100% of 6.6 million rows, so every field is required by evidence. A missing field is exactly the drift the check exists to catch. An `optional` flag nothing uses would be untested. | No code change. The runbook (point 5) says how to add an optional field if FireAnt ever sends one. |
+| 3 | The FDR family is global | Correct, and intended. The report says "every logged test of every valid run", but does not say that this is not a pre-registered family. | Add a sentence to the report header |
+| 4 | `arg_min` for label and q BY | Real but minor. 12 (run, q) pairs in the real store are ties, so the label shown among tied tests is arbitrary. The q values cannot disagree: equal BH q gives equal BY q. | Pick one row with `row_number()`, ordered by q, run, label |
+| 5 | Runbook for contract changes | Useful | Short runbook in `README.md` |
+| 6 | Task runner cleanup | Checked; no change needed. An exception before the release: `finally` still releases (`owns_lock` stays True). `release` cannot raise (`rmtree(ignore_errors=True)`). If `save_record` fails after the release, the record shows running and then interrupted once the runner exits; that is the same as before. SIGTERM only sets `cancelled`. On SIGKILL, the lock keeps a dead pid and is taken over as stale. | None; explained here |
+| 7 | Confirm CI on the head commit | The user checks it (no `gh` on this machine) | - |
+
+Fix steps (new commits on `contract-and-fdr`):
+
+1. Contract dates: keep the regex for the shape, then parse with `datetime.fromisoformat`, the same
+   semantics as `parse_date`. A failure is `bad_date`. Add tests for an impossible day, an impossible month,
+   impossible hours and minutes, and a bad offset.
+2. FDR report:
+   - one row per hypothesis via `row_number()` (q BH, then `run_id`, then `label`);
+   - the header names the family as the global exploratory family, which is not a pre-registered family;
+   - a test with tied q values checks that the chosen label is deterministic.
+3. `README.md`: runbook for a contract warning or error.
+   1. Keep the raw file.
+   2. Decide whether the change is a schema change or bad data.
+   3. Update the contract and the fixtures, and the normalizer if needed.
+   4. Run the contract and normalizer tests.
+   5. Run `fireant contract scan --since DATE`.
+   6. Resume. `--no-contract` is for one day only, after a decision.
+4. Mutation-check the new tests. Run the full suite, re-run `contract scan` and `quant audit fdr`, and
+   update this doc and `STATUS.md`.
+
+### Review fixes: result
+
+- Contract dates: the regex fixes the shape, then `datetime.fromisoformat` must accept the value.
+  - New tests: 9 impossible or malformed dates (day, month, hour, minute, second, offset, space separator,
+    offset without colon) are errors; 6 valid forms pass.
+  - `fireant contract scan` over all 26,428 raw files: still 0 errors, 0 warnings.
+- FDR report:
+  - one row per hypothesis via `row_number()` (BH q, then run, then label), with a tie test;
+  - the header names the global exploratory family and says that it is not a pre-registered family;
+  - re-run `audit-fdr-20261111T100614.md`: the per-hypothesis table is identical to the first report.
+- `README.md`: "When the payload contract fails" runbook. `daily.sh` always checks the contract, so a
+  skipped day is run by hand: `fireant validate --no-contract`, `quant build`, `quant daily`.
+- Points 2 and 6 were answered in the assessment table, with no code change.
+- 6 new mutations, all caught. Full suite: 451 passed.

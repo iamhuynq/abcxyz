@@ -164,3 +164,76 @@ first real evaluation, a backup `data/results.before-risk.duckdb` is taken.
 - A backtest-run evaluation reproduces the stored max drawdown of that run.
 - No existing table changes, apart from new `risk` runs.
 - The full suite is green, and every new test fails under its mutation.
+
+## Result, PR 1 (2026-11-11)
+
+Branch `risk-engine`. Full suite: 520 passed (483 before). All plan decisions were applied as written, with one
+addition: risk evaluations are refused on validation and holdout dates. Those periods are frozen, and a risk
+run on them would also add to the holdout run count.
+
+### Code
+
+- `quant_research/risk/`:
+  - `metrics.py`: drawdown with indices, volatility, downside volatility, historical VaR / ES with their sample
+    and tail counts, HHI;
+  - `liquidity.py`: horizon at 10% of ADV20, cost with fee, tax and cost model v1, stale and floor flags;
+  - `limits.py`: frozen versioned policies, inclusive thresholds, INCOMPLETE first;
+  - `data.py`: paper and backtest snapshots, market inputs, point-in-time clusters, factor z;
+  - `evaluate.py`: `assess` (pure) and persistence;
+  - `report.py`, `cli.py`.
+- `quant risk evaluate --paper | --backtest RUN [--date D] [--policy default/v1]`, `quant risk policies`,
+  `quant risk report RUN`.
+- New tables, all additive: `risk_policies`, `risk_evaluations`, `risk_metrics`, `risk_limit_results`,
+  `risk_positions`. A risk run is a `research_runs` row of kind `risk` and logs no hypothesis.
+- Audit gaps closed:
+  - The Exposure Engine's renormalization over the positions with returns is now visible. Beta and volatility
+    are scaled to the NAV by the covered weight, and any position without enough returns makes beta and
+    effective bets INCOMPLETE.
+  - The exposure loader and `current_paper_date` moved from the UI to `quant_research`
+    (`risk/data.exposure_returns`, `paper_state`). On the real data the moved loader gives identical frames
+    (25 symbols x 120 sessions).
+  - Clusters are point in time.
+
+### Real store
+
+Backup `data/results.before-risk.duckdb`. After the runs, the only changes are the 5 new tables and 2 `risk`
+runs in `research_runs`; there are no hypothesis rows.
+
+Paper portfolio at 2026-11-09: **INCOMPLETE**.
+- Concentration and liquidity pass:
+  - position 7.1%;
+  - industry 20.0%;
+  - cluster 29.2% where known;
+  - illiquid 0%;
+  - stale 0%;
+  - worst drawdown -4.7%;
+  - liquidation cost 1.05% of NAV.
+- Beta 0.60 and effective bets 9.7 are INCOMPLETE because CAR (7.1% of NAV) has fewer than 96 clean returns
+  in the 120-session window.
+- The cluster limit is INCOMPLETE: 7 of the 20 holdings (BMI, CAR, CRE, FMC, G36, MBG, TTF) are outside the
+  cross-stock cluster universe (top 200 by liquidity), so they have no cluster.
+- VaR / ES are not available (25 returns).
+
+Backtest `20261004T184901-backtest-oi_d10_h10_k20_renew-research` at 2023-12-29:
+- the stored equity's max drawdown is reproduced (-27.04%, the stored metric is -0.27044);
+- AMD, HBB and KTB had stopped trading before the date, so they are INCOMPLETE for liquidity and written down;
+- the positions rebuilt from the trades differ from the stored equity by 0.32%, which is reported in the note.
+
+A holdout backtest is refused.
+
+### Tests and mutation check
+
+Tests: `test_risk.py` (27, hand-computed) and `test_risk_evaluate.py` (12; synthetic store, CLI, frozen
+periods, frozen policies, no change to existing tables).
+
+Mutation check: 22 mutations covering the spec's list and more, all caught by an assertion.
+- The first pass was wrong: a same-size mutation (two digits swapped) left stale bytecode behind. It made
+  every later mutation look caught and hid two surviving ones (beta not scaled to NAV; a position counted as
+  held on its exit day). Both got tests.
+- The loop now runs with `PYTHONDONTWRITEBYTECODE=1`.
+- Earlier mutation checks in this project mutated SQL (read at run time) or changed the file size, so they
+  were not affected.
+
+### Open decision
+
+The cluster limit and stocks outside the cluster universe: see the reply of 2026-11-11.

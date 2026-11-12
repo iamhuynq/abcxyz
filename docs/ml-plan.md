@@ -801,3 +801,202 @@ Full suite: 689 passed (688 before).
   - 20 earlier dataset mutations; the 4 PID-recovery mutations no longer apply and are retired;
   - 5 new: no flock, shared instead of exclusive lock, lock file unlinked after publish, descriptor never
     closed, lock file replaced on acquire.
+
+## PR #12: baseline models (plan, 2026-11-12)
+
+Input: the external PR #12 plan (models, training, prediction, artifacts). Branch `ml-baseline-models` from
+`main` at `f06945b` (PR #11 merged). This section maps that plan onto the existing contracts and records where
+it differs from earlier decisions.
+
+### Audit
+
+- PR #11 is merged (`f06945b`); `main` equals `origin/main`; 689 tests pass.
+- `DatasetResult.data` holds the kept rows only: `date`, `symbol`, the features in `DatasetSpec` order, the
+  label, `label_start`, `label_end`. Kept rows have no NULL feature or label (excluded as `feature_null` /
+  `label_null`). Rows are written in (`date`, `symbol`) order; `content_hash` sorts by that key, so row
+  positions are well defined only if that order is checked.
+- `contracts.MODELS = ("ridge", "elasticnet")`; `ExperimentSpec(model, params, seed, ...)` already validates
+  model families, a seed and deep-frozen params.
+- Dependencies: numpy, pandas, scipy, statsmodels. No scikit-learn and no tree library. Decision 7 of this plan
+  (section 3) requires a written dependency review before any tree library.
+- `provenance.ENV_PACKAGES` and `environment()` already record library versions; `canonical.digest` is the
+  hashing convention; `dataset.py` holds the atomic publish and the `flock` lock.
+
+### Differences from the external plan (to approve)
+
+1. **Models without new dependencies.** The external plan names `DummyRegressor`, `Ridge` and
+   `HistGradientBoostingRegressor` (scikit-learn). Recommendation:
+   - `mean`: predicts the training label mean. A sanity reference, not an experiment model: a separate
+     `REFERENCE_MODELS` tuple, so `ExperimentSpec` still accepts only `ridge` and `elasticnet` and its
+     `experiment_id` contract is unchanged.
+   - `ridge`: closed form in numpy (`solve((X'X + alpha I), X'y)` on standardized features, intercept not
+     penalized).
+   - `elasticnet`: statsmodels `OLS.fit_regularized(method="elastic_net", alpha, L1_wt)` on standardized
+     features, deterministic coordinate descent.
+   - Tree model: deferred. It needs the dependency review (size, license, determinism across threads) and a
+     pickle artifact (see 2); it can be its own small PR after PR #13 if a linear model shows anything.
+2. **Artifact without pickle.** Every model above is fully described by numbers: training means and
+   standard deviations, coefficients, intercept. The artifact stores them as canonical JSON (floats as
+   `float.hex`), so loading executes no code and the serialization trust boundary of the external plan does not
+   arise. The fitted model is rebuilt from those numbers and must predict identically.
+3. **Model spec.** A new frozen `ModelSpec(model, params, seed)` in `contracts.py`, validated like the other
+   specs: known model, allowed parameter names per model (`ridge`: `alpha > 0`; `elasticnet`: `alpha > 0`,
+   `0 < l1_wt <= 1`; `mean`: none), seed >= 0. Target and features are not repeated in the spec: they come from
+   the dataset's own metadata (`DatasetSpec`), so they cannot disagree. Prediction then checks the dataset's
+   ordered features (names and source versions) and label against the trained model.
+4. **Dataset policy for prediction.** A trained model predicts only on the dataset it was trained on (same
+   fingerprint). This is all PR #13 needs (each fold trains and predicts on one dataset). Prediction on another
+   dataset (forward data) needs its own rule and a pre-registration later; it is refused now.
+5. **Shared publish code.** The atomic directory publish and the `flock` lock move from `dataset.py` to
+   `ml/publish.py`, used by both the dataset and the model artifact. No behaviour change: the existing dataset
+   tests, including the lock tests, must pass unchanged.
+
+### Design
+
+- `contracts.py`: `ModelSpec`, `REFERENCE_MODELS`.
+- `models.py`: the three estimators as pure functions over numpy arrays: `fit(spec, X, y) -> FittedModel` (a
+  frozen record of means, scales, coefficients, intercept) and `predict(fitted, X)`. Standardization uses the
+  training rows only (ddof 0). A feature constant in the training rows gets scale 1 and, centered, contributes
+  nothing (ridge gives it coefficient 0); this is recorded, not refused.
+- `training.py`:
+  - `fit_model(dataset, train_indices, spec) -> TrainedModel`;
+  - `predict_model(trained, dataset, prediction_indices) -> DataFrame`.
+  - Indices are row positions in `dataset.data`. Checks, all failing with `ContractError`:
+    - the dataset fingerprint verifies (as `read_dataset` does) and rows are in (`date`, `symbol`) order with
+      unique keys;
+    - indices are a non-empty 1-D integer sequence, no bool, no duplicates, no negatives, within range;
+    - the feature matrix is exactly the dataset's ordered feature columns: no label, interval, key or metadata
+      column can enter it, by construction and by a check;
+    - every feature and label value used is finite (no NaN or inf), never filled;
+    - for prediction: same dataset fingerprint, same ordered features and label as the trained model.
+  - The feature matrix is built from the selected rows only, so nothing outside `train_indices` can reach the
+    fit. Prediction reads only feature columns.
+  - Training metadata: row count, a hash of the ordered training keys, first and last training dates and the
+    latest training `label_end` (all from the rows, no calendar arithmetic), so PR #13 can check its folds.
+  - Output of prediction: `date`, `symbol`, `label`, `prediction`, `model_id`, `dataset_fingerprint`, in the
+    order of `prediction_indices`.
+- `artifacts.py`: `save_model(trained, path)` and `load_model(path)`: one directory with `model.json`
+  (`{"model_id", "metadata", "fitted"}`), published atomically, never overwritten. Metadata: artifact schema
+  version, `ModelSpec` and its version, label and horizon, ordered features with source versions, dataset
+  fingerprint and its provenance (copied from the dataset metadata), training summary, library versions
+  (`provenance.environment()`), a hash of the ML code files, `created_at`. `model_id` is a canonical digest of
+  everything except `created_at`. `load_model` recomputes it and refuses any edit, an unknown schema version, or
+  a fitted record whose shapes do not match the features.
+- No change to the Factor Engine, the Risk Engine, the warehouse schema, the dataset builder's behaviour or any
+  portfolio code. No folds, no purge, no performance metrics (PR #13 and #14).
+
+### Tests (`tests/research/test_ml_models.py`, `test_ml_training.py`)
+
+- Estimators: ridge against an independent least-squares solution on augmented rows; elasticnet with
+  `l1_wt = 1` zeroes a pure-noise feature on a hand-made problem; `mean` equals the training mean; a constant
+  feature gets coefficient 0.
+- `ModelSpec`: unknown model, unknown or invalid parameter, negative seed, bool where an int is expected.
+- Indices: empty, duplicate, negative, out of range, float, bool, 2-D are refused.
+- Leakage and adversarial:
+  - changing labels of prediction rows does not change predictions;
+  - changing features or labels of rows outside `train_indices` does not change the fitted record;
+  - standardization statistics equal those of the training rows alone;
+  - a reordered or renamed feature column, a dataset with a label column added as a feature, and NaN or inf
+    in a used row are refused;
+  - a dataset with a different fingerprint, a tampered dataset (fingerprint does not verify) and rows out of
+    key order are refused;
+  - the input dataset is unchanged after fit and predict (content hash before and after).
+- Prediction keeps the order and keys of `prediction_indices`, including a shuffled index list.
+- Artifacts: save and load round trip predicts identically (exact equality: the numbers are stored exactly);
+  edited metadata, edited coefficients, an unknown schema version and an existing destination are refused; a
+  failed publish leaves nothing behind.
+- Reproducibility: the same inputs give the same `model_id` in a separate process.
+- Integration: build the synthetic dataset (PR #11 fixture), train each model on the first part, predict on
+  the rest, save, load, predict again.
+- Every new test mutation-checked with `PYTHONDONTWRITEBYTECODE=1`; full suite at the end.
+
+### Acceptance
+
+The external plan's checklist, with two substitutions: `mean` instead of `DummyRegressor`, and no tree model
+(deferred to a dependency review). The serialization trust boundary is documented as "no code is loaded".
+
+### PR #12 plan review (external, 2026-11-12): revisions
+
+The external final plan accepts the five differences above and adds requirements. Checked against the code and
+statsmodels 0.15.0, numpy 2.5.3:
+
+- **Training indices strictly increasing** (refused otherwise, never sorted); prediction indices in any order,
+  output in the caller's order.
+- **Labels attached after prediction.** The estimator receives only the feature matrix; the `label` column of the
+  output is joined afterwards, for evaluation only.
+- **One shared dataset verification.** `dataset.py` gains `verify_dataset(data, metadata, fingerprint)`, the check
+  `read_dataset` already does (content hash, then fingerprint), and `read_dataset` calls it. Training and
+  prediction call it on every call, for an in-memory `build_dataset` result and a loaded one alike; no fingerprint
+  logic in `training.py`. It also checks that the feature columns equal the metadata's ordered features.
+- **ElasticNet, verified.**
+  - Objective of `OLS.fit_regularized(method="elastic_net")`: `0.5 * RSS / n + alpha * ((1 - L1_wt) * |b|_2^2 / 2
+    + L1_wt * |b|_1)` (glmnet scale).
+  - `alpha` may be a vector, one weight per coefficient: the intercept column gets weight 0, so it is not
+    penalized.
+  - The result exposes `converged`; a fit that did not converge is refused. Solver settings are fixed constants
+    (`maxiter`, `cnvrg_tol`), recorded in the artifact and part of `model_id`.
+  - Two identical fits give bit-identical coefficients (checked).
+- **Ridge on the same alpha scale.** Ridge minimizes `0.5 * RSS / n + alpha * |b|_2^2 / 2`, that is
+  `solve(Xs'Xs + n * alpha * I, Xs'yc)` with `np.linalg.solve`, so `alpha` means the same thing in both models.
+  Independent test: it equals statsmodels `fit_regularized` with `L1_wt = 0` and a zero intercept weight.
+- **Seed.** Recorded and part of the identity; the current models are deterministic, so changing it does not
+  change coefficients (stated in the docstring and tested).
+- **Artifact.** `model.json` carries `artifact_schema_version = "model/1"`; malformed JSON, an unknown version,
+  mismatched shapes, non-finite numbers and a mismatched `model_id` are refused. Tests split into
+  `test_ml_models.py`, `test_ml_training.py`, `test_ml_artifacts.py`.
+- **Publisher.** Extracted to `ml/publish.py` only as a move (same lock, same atomic rename); every PR #11 test
+  must pass unchanged. If the move turns out to need behaviour changes, only the lock primitive is shared.
+- **Cost to note.** Verifying the dataset recomputes the content hash over every row on each fit and predict.
+  On the synthetic dataset this is negligible; on the real research dataset it will be measured. If PR #13
+  finds it too slow, a verified-dataset handle is designed there, not by weakening the check here.
+
+### Result, PR #12 (2026-11-12)
+
+Branch `ml-baseline-models` from `f06945b`. Full suite: 754 passed (689 before, 65 new).
+
+- **`contracts.py`.** `ModelSpec(model, params, seed)`, frozen, validated, canonical; parameters are stored as
+  floats (`1` and `1.0` give one hash). `REFERENCE_MODELS = ("mean",)`; `MODELS` and `ExperimentSpec` unchanged.
+- **`models.py`.** `mean`, `ridge` (closed form, glmnet alpha scale), `elasticnet` (statsmodels, intercept weight 0,
+  `maxiter = 1000`, `cnvrg_tol = 1e-8`, non-convergence refused). Standardization from the training rows only;
+  a constant feature gets scale 1 and coefficient 0. `FittedModel` holds only finite Python floats and
+  round-trips exactly through `float.hex`.
+  - Found while testing: a BLAS matrix product gave predictions that differed in the last bit with the batch and
+    memory layout. Inputs are now made C-contiguous and predictions summed feature by feature, so a row's
+    prediction is exact and independent of its batch (tested).
+- **`training.py`.**
+  - `open_dataset` takes a `DatasetResult` or the `read_dataset` pair and verifies it via
+    `dataset.verify_dataset`. It also checks the column layout, float dtypes, unique keys and (`date`, `symbol`)
+    order.
+  - `fit_model` (strictly increasing indices) and `predict_model` (any order, kept) check every index rule.
+  - Output columns: `row`, `date`, `symbol`, `label_name`, `prediction`, then `label` (attached after
+    prediction), `model_id`, `dataset_fingerprint`.
+  - Training metadata: rows, ordered keys hash, first and last dates, first `label_start`, last `label_end`.
+  - `model_id` covers the spec, the exact fitted numbers and the metadata, including the dataset provenance,
+    the solver settings, `provenance.environment()` and a hash of the ML code files.
+- **`artifacts.py`.** One `model.json` (`model/1`), published with `ml/publish.py`, verified by reloading before it
+  becomes visible, never overwritten. `load_model` revalidates the spec, the fitted shapes and values, and
+  recomputes `model_id`. No pickle or joblib: loading runs no code.
+- **`publish.py`.** The lock and atomic publish moved out of `dataset.py` unchanged; `dataset.verify_dataset` is
+  now the one integrity check (`read_dataset` calls it). All 27 PR #11 dataset tests pass unchanged.
+- **Tests.** `test_ml_models.py` (17), `test_ml_training.py` (25), `test_ml_artifacts.py` (23):
+  - ridge equals statsmodels with `L1_wt = 0` and an augmented least-squares solution (to 1e-10), and its
+    predictions equal the independent solution;
+  - lasso zeroes a noise feature; the intercept of both models is never shrunk;
+  - non-convergence is refused; bad indices and bad inputs are refused;
+  - leakage: prediction labels changed, or rows outside `train_indices` changed, give an identical fit and
+    predictions;
+  - a tampered dataset, a foreign dataset and self-consistent malformed datasets are refused: a label copy or a
+    key column among the features, a renamed feature, an object dtype, unsorted rows, a duplicate key;
+  - edited artifacts are refused (16 edits);
+  - the same `model_id` comes out of an in-memory dataset, a loaded dataset and a separate process.
+- **Mutation check.** 46 mutations over all new code and the moved publisher, all caught. Three survived the
+  first run (predict ignoring scales, the fitted float type check, the label read in prediction) and were caught
+  after the tests were strengthened.
+- **Limitations.**
+  - Verifying the dataset recomputes its content hash on every call: about 5.6 s for 500,000 rows and 15
+    columns. PR #13 decides whether it needs a verified-dataset handle.
+  - The real `research.duckdb` still predates the PR #10 build metadata and is refused until the next
+    `quant build`, so no real-data run yet.
+  - Bit-identical results are guaranteed on this machine and environment only; the environment is recorded in
+    every model.
+  - No tree model; it needs a dependency review.

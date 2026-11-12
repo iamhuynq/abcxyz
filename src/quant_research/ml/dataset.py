@@ -7,15 +7,9 @@ window as 04_stock_targets.sql: label_start = lead(date, 1), label_end = lead(da
 adj_close(label_end) / adj_open(label_start) - 1 reproduces fwd_ret_exec_{h}d.
 """
 
-import fcntl
 import hashlib
 import json
 import math
-import os
-import shutil
-import socket
-import time
-import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -25,7 +19,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from quant_research.ml import allowlist
+from quant_research.ml import allowlist, publish
 from quant_research.ml.builds import build_identity, build_source_versions, check_build
 from quant_research.ml.canonical import CONTRACT, digest
 from quant_research.ml.contracts import RESEARCH_END, UNIVERSES, ContractError, DatasetSpec
@@ -192,55 +186,21 @@ def build_dataset(con: duckdb.DuckDBPyConnection, spec: DatasetSpec, build_id: s
 
 
 def write_dataset(result: DatasetResult, path: Path) -> Path:
-    """data.parquet + metadata.json in one directory, renamed into place in one step. `path` must not exist."""
+    """data.parquet + metadata.json in one directory, renamed into place in one step. `path` must not exist. One
+    publisher per path (ml.publish.locked: an fcntl lock released by the kernel if the publisher dies)."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_name(f".{path.name}.lock")
-    fd = _acquire(lock, path)
-    try:
+    with publish.locked(path):
         return _publish(result, path)
-    finally:
-        os.close(fd)                                  # releases the flock; the lock file stays
-
-
-def _acquire(lock: Path, path: Path) -> int:
-    """One publisher per path, with an OS advisory lock (fcntl.flock, exclusive, non-blocking) on a lock file that
-    is never deleted. The kernel releases the lock when its holder exits, crashes or is killed, so there is no stale
-    lock to recover and no PID bookkeeping. The file is never unlinked: deleting a flock file while another process
-    holds it open would let two publishers lock different inodes. Returns the open descriptor; closing it unlocks.
-    POSIX only (macOS, Linux)."""
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        raise FileExistsError(f"{path} is being published by another process (lock {lock})") from None
-    try:                                              # diagnostics only: who holds it; nothing reads it
-        os.ftruncate(fd, 0)
-        os.write(fd, json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "since": time.time()}).encode())
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _publish(result: DatasetResult, path: Path) -> Path:
-    if path.exists():
-        raise FileExistsError(f"{path} exists: a dataset artifact is never overwritten")
-    tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    tmp.mkdir()
-    try:
+    def write(tmp: Path) -> None:
         result.data.to_parquet(tmp / "data.parquet", index=False)
         (tmp / "metadata.json").write_text(json.dumps({"fingerprint": result.fingerprint,
                                                        "metadata": json.loads(json.dumps(
                                                            dict(result.metadata), default=str))},
                                                       sort_keys=True, indent=1))
-        read_dataset(tmp)                                 # verify both files before they become visible
-        tmp.rename(path)
-    except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-    return path
+    return publish.publish_dir(path, write, read_dataset, "a dataset artifact")
 
 
 def read_dataset(path: Path) -> tuple[pd.DataFrame, dict]:
@@ -248,10 +208,17 @@ def read_dataset(path: Path) -> tuple[pd.DataFrame, dict]:
     path = Path(path)
     doc = json.loads((path / "metadata.json").read_text())
     data = pd.read_parquet(path / "data.parquet")
-    meta = doc["metadata"]
-    actual = content_hash(data)                       # recomputed from the data, never trusted from the metadata
-    if actual != meta.get("content_hash"):
-        raise ContractError(f"{path}: the data does not match its metadata (content hash)")
-    if doc.get("fingerprint") != fingerprint(meta, actual):
-        raise ContractError(f"{path}: the metadata does not match its fingerprint")
+    verify_dataset(data, doc["metadata"], doc.get("fingerprint"), where=f"{path}: ")
     return data, doc
+
+
+def verify_dataset(data: pd.DataFrame, metadata, fp, where: str = "") -> str:
+    """The one dataset integrity check, for a built result and a loaded artifact alike: the content hash is
+    recomputed from the data (never trusted from the metadata) and the fingerprint from both. Returns the
+    fingerprint. Raises ContractError on any mismatch."""
+    actual = content_hash(data)
+    if actual != metadata.get("content_hash"):
+        raise ContractError(f"{where}the data does not match its metadata (content hash)")
+    if fp != fingerprint(metadata, actual):
+        raise ContractError(f"{where}the metadata does not match its fingerprint")
+    return fp

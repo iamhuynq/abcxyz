@@ -23,7 +23,9 @@ RESEARCH_START, RESEARCH_END = PERIOD_RANGES["research"]
 LABEL_COLUMNS = {"fwd_ret_exec_3d": 3, "fwd_ret_exec_5d": 5, "fwd_ret_exec_10d": 10, "fwd_ret_exec_20d": 20,
                  "fwd_excess_exec_5d": 5, "fwd_excess_exec_10d": 10, "fwd_excess_exec_20d": 20}
 UNIVERSES = {"point_in_time_default": ResearchParams().point_in_time_sql()}   # known at the close of t
-MODELS = ("ridge", "elasticnet")                 # PR #12 adds a model only through this list
+MODELS = ("ridge", "elasticnet")                 # experiment models; PR #12 adds a model only through this list
+REFERENCE_MODELS = ("mean",)                     # sanity references: fit and predict, never an ExperimentSpec model
+MODEL_PARAMS = {"ridge": ("alpha",), "elasticnet": ("alpha", "l1_wt"), "mean": ()}   # all required, no defaults
 PRIMARY_TESTS = ("incremental_rank_ic_newey_west",)
 
 
@@ -173,6 +175,46 @@ class SplitSpec:
         _check_date("first_date", self.first_date)
         _check_date("last_date", self.last_date)
         _require(RESEARCH_START <= self.first_date <= self.last_date, "split dates must be ordered and in research")
+
+    @property
+    def version(self) -> str:
+        return digest(self)
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """A model family, its parameters and a seed (PR #12). The target and the ordered features are not repeated
+    here: they come from the dataset's own metadata, so they cannot disagree with it.
+
+    - ridge: `alpha > 0`; elasticnet: `alpha > 0` and `0 < l1_wt <= 1`, on the glmnet scale of statsmodels
+      (`0.5 * RSS / n + alpha * ((1 - l1_wt) * |b|_2^2 / 2 + l1_wt * |b|_1)`); ridge uses the same scale
+      (l1_wt = 0); mean: no parameters.
+    - Parameters are stored as floats, so `1` and `1.0` give the same spec and hash.
+    - The seed is part of the identity. The current models are deterministic: it does not change the fit."""
+    model: str
+    params: dict = field(default_factory=dict)
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        _check_type("model", self.model, str)
+        _require(self.model in MODELS + REFERENCE_MODELS,
+                 f"model {self.model!r} is not an approved family {MODELS + REFERENCE_MODELS}")
+        _check_type("seed", self.seed, int)
+        _require(self.seed >= 0, "seed must be >= 0")
+        _require(isinstance(self.params, Mapping), "params must be a mapping")
+        names = MODEL_PARAMS[self.model]
+        _require(set(self.params) == set(names), f"{self.model} takes exactly the parameters {names}, "
+                                                 f"not {tuple(sorted(map(str, self.params)))}")
+        params = {}
+        for name in names:
+            v = self.params[name]
+            _check_type(name, v, (int, float))
+            v = float(v)
+            _require(math.isfinite(v), f"{name} must be finite")
+            params[name] = v
+        _require("alpha" not in params or params["alpha"] > 0, "alpha must be > 0")
+        _require("l1_wt" not in params or 0 < params["l1_wt"] <= 1, "l1_wt must be in (0, 1]")
+        object.__setattr__(self, "params", freeze(params))
 
     @property
     def version(self) -> str:

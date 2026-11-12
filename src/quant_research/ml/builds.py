@@ -65,3 +65,18 @@ def check_build(con: duckdb.DuckDBPyConnection, build_id: str, dataset: DatasetS
     if bad:
         raise ContractError(f"feature build {build_id} was not produced under the approved configuration: "
                             + "; ".join(bad))
+
+
+def build_identity(con: duckdb.DuckDBPyConnection, build_id: str, schema: str = "") -> dict[str, str]:
+    """The data identity of a build: warehouse_sha, code_hash, data_as_of. Empty or NULL values fail closed."""
+    row = con.execute(f"SELECT warehouse_sha, code_hash, data_as_of FROM {schema}feature_builds WHERE build_id = ?",
+                      [build_id]).fetchone()
+    if row is None:
+        raise ContractError(f"no feature build {build_id}")
+    wh, code, as_of = row
+    for name, v in (("warehouse_sha", wh), ("code_hash", code)):
+        if not isinstance(v, str) or not v.strip():
+            raise ContractError(f"feature build {build_id} has no {name}: its data identity is unknown")
+    if as_of is None:
+        raise ContractError(f"feature build {build_id} has no data_as_of")
+    return {"warehouse_sha": wh, "code_hash": code, "data_as_of": str(as_of)}

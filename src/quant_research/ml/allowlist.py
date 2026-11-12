@@ -19,7 +19,11 @@ STOCK_FEATURES = (
     "volume_imbalance", "buy_pressure", "sell_pressure", "buy_sell_ratio", "foreign_net_value",
     "foreign_net_3d", "foreign_net_5d", "foreign_net_20d", "foreign_net_ratio_20", "foreign_intensity",
     "adv_value_20", "market_regime")
-FACTOR_FIELDS = ("rank_pct", "z", "z_industry")
+FACTOR_FIELDS = ("rank_pct", "z")
+# z_industry is NOT approved: it subtracts the ICB level-2 mean, and the ICB code is the current classification
+# (no history; integrity finding E-1), so it is not point in time. Until an industry history exists.
+LIMITATIONS = ("z_industry excluded: industry is the current ICB classification, not point in time",
+               "exchange and industry are current values (integrity finding E-1)")
 STOCK_FACTORS = tuple(f"{f}.{field}" for f in factors.FACTORS for field in FACTOR_FIELDS)
 MARKET_REGIMES = tuple(regimes.DIMENSIONS)
 

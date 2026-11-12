@@ -48,7 +48,7 @@ def test_allowlisted_features_are_accepted_at_their_current_version():
     assert set(allowlist.STOCK_FACTORS) == {f"{f}.{field}" for f in ("liquidity", "momentum_12_1", "momentum_1m",
                                                                         "reversal_1w", "volatility", "beta", "order_flow",
                                                                         "foreign_flow", "volume_surge")
-                                            for field in ("rank_pct", "z", "z_industry")}
+                                            for field in ("rank_pct", "z")}
     assert set(allowlist.MARKET_REGIMES) == {"direction", "volatility", "liquidity", "breadth", "foreign", "risk"}
 
 

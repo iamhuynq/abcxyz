@@ -241,6 +241,16 @@ Registry). Summary:
     - fourth: every ML source version is bound to the feature-build code hash (`build_factors`, all build SQL,
       regimes and costs code), so data built by other code is refused;
   - next: PR #11, the point-in-time dataset builder.
+- PR #10 (ML foundation) merged into `main` (`3bbbda5`).
+- PR #11, the ML dataset builder (branch `ml-dataset-builder`, not pushed; plan and results in `ml-plan.md`):
+  - `ml/dataset.py`: read-only and provenance-checked;
+  - per-symbol label intervals reproduce the stored labels;
+  - 8 ordered exclusion reasons with reconciled counts;
+  - canonical content fingerprint;
+  - atomic Parquet and JSON artifact;
+  - `z_industry` removed from the allowlist;
+  - 13 mutations, all caught;
+  - next: PR #12, the baseline models.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

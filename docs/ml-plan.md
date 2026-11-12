@@ -660,3 +660,44 @@ after the call.
      the intervals of the kept rows are unchanged and still reproduce `fwd_ret_exec_{h}d`.
 
 Scope unchanged: no model training, no experiment runner.
+
+### Result, PR #11 (2026-11-12)
+
+Branch `ml-dataset-builder`. Full suite: 677 passed (662 before). No database is written, no model,
+no runner.
+
+- **`ml/dataset.py`.**
+  - `build_dataset(con, spec, build_id, schema)`:
+    - runs `check_build` first, then `build_identity` (non-empty `warehouse_sha` and `code_hash`, plus
+      `data_as_of`);
+    - candidates are every `daily_panel` row in the period;
+    - intervals are `lead(date, 1)` / `lead(date, h)` over each symbol's full series;
+    - features are left-joined from the validated specs only (factor names bound as parameters);
+    - `check_unique` and `check_point_in_time` run on the result;
+    - every row gets one status in the explicit `REASONS` order;
+    - accounting is reconciled or the call raises.
+  - `DatasetResult`: data, metadata, fingerprint, exclusions (every reason, zeros included, with its share),
+    and the row counts.
+  - Fingerprint: the canonical digest of the provenance plus `content_hash` (rows sorted by date and symbol,
+    floats as `float.hex`).
+  - `write_dataset` / `read_dataset`: one temporary directory holding `data.parquet` and `metadata.json`,
+    verified and renamed in one step. An existing path is refused, and a failure leaves nothing behind. Reading
+    refuses a content-hash or fingerprint mismatch.
+- **`z_industry` removed from the allowlist** (18 factor entries). `allowlist.LIMITATIONS` is copied into the
+  metadata.
+- **`ml/builds.build_identity`** checks the data identity of a build.
+- **Tests (`test_ml_dataset.py`, 15).**
+  - The read-only check compares the database file hash before and after.
+  - Interval and label reproduction to 1e-12, for every symbol and horizons 3/5/10/20, against each symbol's
+    own sessions. This includes a no-trade session inside UPC's series, and a dataset starting mid-series
+    (intervals unchanged).
+  - Masks never hidden by a NULL label; first match wins; `feature_null` counted; `label_after_dataset_end`.
+  - Provenance: empty `warehouse_sha`, non-approved parameters, missing build.
+  - `z_industry` and target columns refused.
+  - Fingerprint: content, order, label, warehouse SHA; stable across processes.
+  - Artifact: atomic, never overwritten, a failure while writing the metadata or before the rename leaves
+    nothing, and tampered data or metadata is refused.
+- **Mutation check.** 13 mutations, all caught. Three first survived and got tests:
+  - intervals computed from traded rows only: a no-trade session was added to the fixture;
+  - the fingerprint not checked on read: a tampered-metadata test;
+  - the dataset-end rule: a dataset ending mid-series.

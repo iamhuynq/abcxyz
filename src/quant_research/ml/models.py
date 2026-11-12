@@ -42,6 +42,11 @@ class FittedModel:
     intercept: float
 
     def __post_init__(self) -> None:
+        for name in ("means", "scales", "coef"):      # own immutable copies: the caller's lists are never kept
+            v = getattr(self, name)
+            if not isinstance(v, (list, tuple)):
+                raise ContractError(f"fitted {name} must be a list or tuple of floats, not {type(v).__name__}")
+            object.__setattr__(self, name, tuple(v))
         if self.model not in MODELS + REFERENCE_MODELS:
             raise ContractError(f"fitted model {self.model!r} is not an approved family")
         k = len(self.coef)

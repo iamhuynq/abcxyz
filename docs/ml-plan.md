@@ -1094,3 +1094,39 @@ Full suite: 786 passed (the new cases extend an existing test).
   refused with `expected float64`.
 - Mutation check: 67 mutations, all caught. The dtype mutation was re-anchored, and a new one restoring the old
   `kind == "f"` rule is caught.
+
+## PR #12 third review (external, 2026-11-12, head `0745232`): assessment and plan
+
+- **`FittedModel` is not deeply immutable: confirmed.**
+  - Built with lists, it keeps the caller's lists. Mutating `coef` afterwards changes `models.predict` (1.0
+    became 999.0 in a check).
+  - Through `TrainedModel` the edit would be caught, because `check_trained` recomputes `model_id`, but
+    `FittedModel` is its own contract.
+- **Plan.**
+  - `FittedModel.__post_init__` copies `means`, `scales` and `coef` into tuples before validating them. A
+    non-sequence (a string, a mapping, a scalar) is refused, and the caller's list is never kept, as
+    `contracts.freeze` does for parameters.
+  - Tests:
+    - list inputs become tuples;
+    - mutating the caller's list after construction changes nothing;
+    - the fields cannot be mutated;
+    - `to_json` and `predict` work on the normalized state;
+    - a string vector is refused.
+  - Add a mutation (no tuple copy) to the PR #12 set.
+- **PR description.** It still reports 754 tests and 65 mutations; the corrected text is given to the user to
+  paste (no `gh` here).
+
+### PR #12 third review fix: result (2026-11-12)
+
+Full suite: 787 passed (786 before).
+
+- `FittedModel.__post_init__` copies `means`, `scales` and `coef` into tuples before validating them; anything
+  that is not a list or tuple (a string, a mapping, a scalar, a numpy array) is refused.
+- Test (`test_fitted_state_is_deeply_immutable`):
+  - list inputs become tuples;
+  - mutating the caller's lists afterwards changes neither the state nor the prediction, which is checked
+    against a hand computation;
+  - the fields cannot be edited or reassigned;
+  - the JSON round trip is exact;
+  - non-sequences are refused.
+- Mutation check: 69 mutations, all caught (2 new: no tuple copy, no sequence type check).

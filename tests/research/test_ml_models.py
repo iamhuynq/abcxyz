@@ -142,3 +142,23 @@ def test_predict_checks_shape_and_values_and_fitted_state_is_checked():
                 {**j, "intercept": 1.5}, {**j, "means": "x"}, {**j, "extra": 1}):
         with pytest.raises(ContractError):
             models.FittedModel.from_json(bad)
+
+
+def test_fitted_state_is_deeply_immutable():
+    means, scales, coef = [0.5, 1.0], [2.0, 1.0], [1.0, -1.0]
+    f = models.FittedModel("ridge", means, scales, coef, 0.25)
+    assert all(type(v) is tuple for v in (f.means, f.scales, f.coef))
+    X = np.array([[1.5, 3.0]])
+    before = models.predict(f, X)
+    coef[0], means[0], scales[0] = 999.0, 999.0, 999.0                   # the caller's lists: not kept
+    assert (f.means, f.scales, f.coef) == ((0.5, 1.0), (2.0, 1.0), (1.0, -1.0))
+    np.testing.assert_array_equal(models.predict(f, X), before)
+    assert before[0] == 0.25 + (1.5 - 0.5) / 2.0 * 1.0 + (3.0 - 1.0) / 1.0 * -1.0
+    with pytest.raises(TypeError):
+        f.coef[0] = 2.0                                                    # tuples cannot be edited
+    with pytest.raises(AttributeError):
+        f.coef = (2.0, 2.0)                                                # frozen dataclass
+    assert models.FittedModel.from_json(f.to_json()) == f
+    for bad in ("12", {"a": 1.0}, 1.0, np.array([1.0, -1.0])):
+        with pytest.raises(ContractError, match="must be a list or tuple"):
+            models.FittedModel("ridge", means, scales, bad, 0.25)

@@ -185,7 +185,8 @@ Registry). Summary:
     - 483 tests pass; 34 mutations in all, every one caught.
 - PR #7 (research integrity audit) merged into `main` (`da49c49`).
 - Risk Engine PR 1 (plan `risk-engine-plan.md`, branch `risk-engine`, PR #8):
-  - `quant risk evaluate --paper | --backtest RUN`: limits under policy `default/v1` (provisional), liquidity,
+  - `quant risk evaluate --paper | --backtest RUN`: limits under the default policy `default/v2` (provisional;
+    `default/v1` kept for reproducibility), liquidity,
     drawdown under both valuations, and VaR / ES once 250 returns exist;
   - status PASS / WARNING / BREACH / INCOMPLETE: missing data never passes;
   - additive `risk_*` tables, runs of kind `risk`, no hypotheses logged;
@@ -202,6 +203,9 @@ Registry). Summary:
     - cost fallback weight is reported;
     - float tolerance at the thresholds;
     - 531 tests pass; 32 mutations, all caught.
+  - Second review fixes: the paper portfolio's traded-mark curve is required. A curve that cannot be measured
+    (missing marks) makes the historical drawdown limit INCOMPLETE instead of being skipped. README and STATUS
+    name `default/v2` as the default. 534 tests pass; 34 mutations, all caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

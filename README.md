@@ -38,7 +38,7 @@ scripts/ui.sh                # local UI on http://127.0.0.1:8501 (Ctrl+C to stop
 | `uv run quant portfolio evaluate` | Portfolio construction grid C1-C6 (research period, one logged test per config) |
 | `uv run quant audit pit` | Point-in-time and survivorship audit (descriptive, read-only) |
 | `uv run quant audit masks` / `fdr` | Outcome-mask sensitivity; BY q-values next to BH, and logged tests outside the FDR family (descriptive, not logged) |
-| `uv run quant risk evaluate --paper` / `--backtest RUN [--date D]` | Risk Engine: limits (policy `default/v1`, provisional), liquidity, drawdown and VaR of a portfolio snapshot; `quant risk policies`, `quant risk report RUN` (descriptive, never changes a portfolio) |
+| `uv run quant risk evaluate --paper` / `--backtest RUN [--date D]` | Risk Engine: limits (default policy `default/v2`, provisional; `--policy default/v1` is kept for reproducibility, v2 splits the historical and the write-down drawdown), liquidity, drawdown and VaR of a portfolio snapshot; `quant risk policies`, `quant risk report RUN` (descriptive, never changes a portfolio) |
 | `uv run quant runs --invalidate RUN --reason TEXT` | Invalidate a run (runs are never deleted) |
 | `uv run quant registry list` / `show ID` / `add` / `move` | Research Registry: every hypothesis, its state and decision (append-only) |
 

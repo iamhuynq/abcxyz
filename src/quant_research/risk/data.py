@@ -56,7 +56,9 @@ class Snapshot:
 
 
 def paper_snapshot(con: duckdb.DuckDBPyConnection) -> Snapshot | None:
-    """The current paper record (`paper_state`): its positions and both of its equity curves."""
+    """The current paper record (`paper_state`): its positions and both of its equity curves. Both curves are
+    required (valuation rule 2026-10-09): a missing traded mark stays NaN, so the evaluation reports the curve as
+    unavailable instead of leaving it out."""
     run_date = current_paper_date(con)
     if run_date is None:
         return None
@@ -68,9 +70,8 @@ def paper_snapshot(con: duckdb.DuckDBPyConnection) -> Snapshot | None:
                          WHERE run_date = ? AND shares > 0 ORDER BY symbol""", [run_date]).df()
     nav = float(daily["equity"].iloc[-1])
     dates = daily["date"].to_numpy()
-    curves = {"pre-registered marks": (dates, daily["equity"].to_numpy(float))}
-    if daily["equity_traded_mark"].notna().all():
-        curves["traded marks"] = (dates, daily["equity_traded_mark"].to_numpy(float))
+    curves = {"pre-registered marks": (dates, daily["equity"].to_numpy(float, na_value=np.nan)),
+              "traded marks": (dates, daily["equity_traded_mark"].to_numpy(float, na_value=np.nan))}
     notes = ["Positions are valued at the pre-registered marks (last close, legacy mode).",
              "The paper record stores no cash: cash is NAV minus positions, so no reconciliation is possible."]
     day = pd.Timestamp(daily["date"].iloc[-1]).date()
@@ -98,7 +99,8 @@ def backtest_snapshot(con: duckdb.DuckDBPyConnection, run_id: str, on: date | No
     gap = nav - cash - float(held["value"].sum())              # NaN when a position has no price
     gap = 0.0 if abs(gap) < 0.5 else gap                       # below half a dong: rounding, printed as 0
     notes = [f"Positions rebuilt from the stored trades; positions + cash differ from the stored equity by "
-             f"{gap:,.0f} VND ({gap / nav:.4%})."]
+             f"{gap:,.0f} VND ({gap / nav:.4%}).",
+             "A backtest run stores one equity curve, at its own marks; no second valuation curve exists."]
     curves = {"stored equity": (daily["date"].to_numpy(), daily["equity"].to_numpy(float))}
     return Snapshot(f"backtest:{run_id}", day, nav, cash, held, curves, notes, gap)
 

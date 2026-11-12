@@ -288,3 +288,21 @@ Real store, policy `default/v2`:
 - Backtest h10 k20 renew at 2023-12-29: historical drawdown -27.0% (WARNING), current write-down drawdown
   -7.9% (PASS). Cluster, beta, effective bets and illiquid weight are INCOMPLETE.
 - The v1 runs stay as stored.
+
+## PR #8 second review (external, 2026-11-12, head `ecbc638`): assessment and plan
+
+| Point | Verified | Assessment | Action |
+|---|---|---|---|
+| P1 a missing traded mark drops the whole `traded marks` curve without a trace | Yes, and wider. `paper_snapshot` leaves the curve out if any value is NULL. Separately, `_drawdowns` skips any curve whose drawdown cannot be computed (`if dd:`), for any snapshot. On the real store, the current paper record has 26 of 26 traded marks, so no stored result is affected. | Valid | Decision: the traded-mark curve is **required** for the paper portfolio (valuation rule 2026-10-09: report both, judge on the worse). The curve is always loaded, with NULL as NaN. A curve whose drawdown cannot be computed makes `max_drawdown_historical` (and v1's `max_drawdown`) INCOMPLETE, naming the curve and its missing-value count; its metric rows are kept, with the reason. A backtest stores one curve (its run's own marks), and the report says so. Tests: one NULL inside the series, every value NULL, and a complete series. |
+| P2 documentation names `default/v1` as the default | Yes (README line 41, STATUS) | Valid | README and STATUS name `default/v2` as the default and say that v1 is kept for reproducibility, with the drawdown split in v2. |
+
+### PR #8 second review fixes: result (2026-11-12)
+
+- `paper_snapshot` always loads both curves; a NULL traded mark stays NaN.
+- `_drawdowns` reports every curve whose drawdown cannot be computed: `max_drawdown_historical` and v1's
+  `max_drawdown` become INCOMPLETE with "valuation curve unavailable: <curve> (<k> of <n> values missing or not
+  finite)". The curve's rows stay in the report, and the other curves are still shown.
+- Backtest reports say that a run stores one curve.
+- Tests: no NULL (WARNING at -20%), one NULL inside the series and all NULL (INCOMPLETE with the count).
+- Mutation check: 2 more (curve dropped; unmeasurable curve skipped), 34 in all, every one caught.
+- README and STATUS name `default/v2` as the default and v1 as kept for reproducibility.

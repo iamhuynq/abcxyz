@@ -79,11 +79,22 @@ def _group_max(weights: pd.Series, labels: pd.Series, warning: float) -> _Groups
     return _Groups(top, max(top, rest), tuple(sorted(known.index[known >= warning])), lacking, rest)
 
 
+def _curve_problem(equity: np.ndarray) -> str:
+    """Why a curve's drawdown cannot be computed ("" if it can)."""
+    e = np.asarray(equity, dtype=float)
+    bad = int((~np.isfinite(e)).sum())
+    if bad:
+        return f"{bad} of {len(e)} values missing or not finite"
+    if np.any(e <= 0):
+        return f"{int((e <= 0).sum())} of {len(e)} values not positive"
+    return "fewer than 2 points" if len(e) < 2 else ""
+
+
 def _curve_metrics(name: str, equity: np.ndarray) -> tuple[list, metrics.Drawdown | None]:
     rows, dd, rets = [], metrics.drawdown(equity), metrics.returns(equity)
     scope = f"curve:{name}"
     rows += [(scope, "sessions", float(len(equity)), ""),
-             (scope, "current_drawdown", dd.current if dd else None, "" if dd else "fewer than 2 valid points"),
+             (scope, "current_drawdown", dd.current if dd else None, _curve_problem(equity)),
              (scope, "max_drawdown", dd.maximum if dd else None, ""),
              (scope, "volatility_ann", metrics.volatility(rets), "daily returns, sqrt(250)"),
              (scope, "downside_volatility_ann", metrics.downside_volatility(rets), "shortfall below 0, sqrt(250)")]
@@ -248,11 +259,14 @@ def _drawdowns(pos: pd.DataFrame, snap: data.Snapshot, acc: _Acc) -> None:
     current drawdown if stuck positions were valued at 0 (a valuation assumption). Policy v1's max_drawdown is
     the worse of the two; v2 checks each one."""
     hist: list[float] = []
+    broken: list[str] = []          # a valuation curve that is present but cannot be measured is never skipped
     for name, (_dates, equity) in snap.curves.items():
         rows, dd = _curve_metrics(name, equity)
         acc.out += rows
         if dd:
             hist.append(dd.maximum)
+        else:
+            broken.append(f"{name} ({_curve_problem(equity)})")
     acc.vals["max_drawdown_historical"] = min(hist) if hist else None
     first = next(iter(snap.curves.values()), None)
     cur_wd = None
@@ -267,8 +281,11 @@ def _drawdowns(pos: pd.DataFrame, snap: data.Snapshot, acc: _Acc) -> None:
     acc.vals["current_drawdown_write_down"] = cur_wd
     both = [x for x in (acc.vals["max_drawdown_historical"], cur_wd) if x is not None]
     acc.vals["max_drawdown"] = min(both) if both else None
-    if not hist:
-        acc.missing["max_drawdown_historical"] = acc.missing["max_drawdown"] = "no equity curve with 2 valid points"
+    if broken:
+        acc.missing["max_drawdown_historical"] = acc.missing["max_drawdown"] = (
+            "valuation curve unavailable: " + "; ".join(broken))
+    elif not hist:
+        acc.missing["max_drawdown_historical"] = acc.missing["max_drawdown"] = "no equity curve"
     if cur_wd is None:
         acc.missing["current_drawdown_write_down"] = "no equity curve with a positive peak"
 

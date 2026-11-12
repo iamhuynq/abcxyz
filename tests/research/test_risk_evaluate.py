@@ -277,3 +277,29 @@ def test_cost_fallback_weight_is_reported():
     a = evaluate.assess(snap, inputs, _returns({"A": 1, "B": 1}), {"A": "c1", "B": "c2"}, None, limits.DEFAULT_V2)
     m = {k: v for s, k, v, _n in a.metrics if s == "liquidity"}
     assert m["cost_fallback_weight"] == pytest.approx(0.2) and m["cost_fallbacks"] == 1
+
+
+@pytest.mark.parametrize("nulls, expected", [(0, None), (1, "1 of 30 values missing or not finite"),
+                                             (30, "30 of 30 values missing or not finite")])
+def test_a_missing_traded_mark_makes_the_historical_drawdown_incomplete(env, nulls, expected):
+    """The traded-mark curve is required for the paper portfolio: a gap is reported, never dropped."""
+    with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
+        dates = [d for (d,) in store.con.execute("SELECT date FROM paper_daily ORDER BY date").fetchall()]
+        hole = dates[10:10 + nulls] if nulls == 1 else dates[:nulls]
+        for d in hole:
+            store.con.execute("UPDATE paper_daily SET equity_traded_mark = NULL WHERE date = ?", [d])
+        snap = data.paper_snapshot(store.con)
+        assert set(snap.curves) == {"pre-registered marks", "traded marks"}
+        _run_id, a = evaluate.evaluate(store, snap, limits.DEFAULT_V2, NOW)
+    hist = _limits(a)["max_drawdown_historical"]
+    m = {(s, k): (v, n) for s, k, v, n in a.metrics}
+    if expected is None:
+        assert hist.status == limits.WARNING and hist.value == pytest.approx(-0.2)
+        assert m[("curve:traded marks", "max_drawdown")][0] == pytest.approx(-0.2)
+    else:
+        assert hist.status == limits.INCOMPLETE
+        assert hist.reason == f"valuation curve unavailable: traded marks ({expected})"
+        assert m[("curve:traded marks", "max_drawdown")][0] is None
+        assert m[("curve:traded marks", "current_drawdown")][1] == expected
+        assert m[("curve:pre-registered marks", "max_drawdown")][0] == pytest.approx(-0.2)   # still shown
+    assert _limits(a)["current_drawdown_write_down"].status == limits.BREACH                  # other limits unaffected

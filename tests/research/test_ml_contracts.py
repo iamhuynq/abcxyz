@@ -42,7 +42,8 @@ def test_allowlisted_features_are_accepted_at_their_current_version():
     assert F("stock_features", "return_5d").source_version == FEATURE_SET_VERSION
     assert F("stock_factors", "momentum_12_1.z").source_version == allowlist.factor_source_version()
     assert allowlist.factor_source_version().startswith(f"{factors.FACTOR_SET}:{factors.version()}:")
-    assert F("market_regimes", "risk").source_version == regimes.version()
+    assert F("market_regimes", "risk").source_version == allowlist.regime_source_version()
+    assert allowlist.regime_source_version().startswith(f"{regimes.version()}:")
     assert set(allowlist.STOCK_FACTORS) == {f"{f}.{field}" for f in ("liquidity", "momentum_12_1", "momentum_1m",
                                                                         "reversal_1w", "volatility", "beta", "order_flow",
                                                                         "foreign_flow", "volume_surge")
@@ -282,12 +283,17 @@ def test_regime_version_covers_every_input_canonically(monkeypatch):
     changes = [("TERCILE_DIMENSIONS", ("volatility", "liquidity", "breadth")),
                ("DIMENSIONS", {**regimes.DIMENSIONS, "risk": (("off", "neutral", "on"), "renamed states")}),
                ("VALUES_SQL", regimes.VALUES_SQL.replace("ROWS BETWEEN 19 PRECEDING", "ROWS BETWEEN 9 PRECEDING")),
-               ("RegimeParams", functools.partial(regimes.RegimeParams, window=499)),
-               ("RegimeParams", functools.partial(regimes.RegimeParams, drawdown_off=-0.25))]
+               ]
     for name, value in changes:
         with monkeypatch.context() as m:
             m.setattr(regimes, name, value)
             assert regimes.version() != base, name
     assert regimes.version() == base
+    source = allowlist.regime_source_version()
+    for value in (functools.partial(regimes.RegimeParams, window=499),
+                  functools.partial(regimes.RegimeParams, drawdown_off=-0.25)):
+        with monkeypatch.context() as m:                      # parameters: not definitions, but the ML source
+            m.setattr(regimes, "RegimeParams", value)
+            assert regimes.version() == base and allowlist.regime_source_version() != source
     monkeypatch.setattr(regimes, "DIMENSIONS", dict(reversed(list(regimes.DIMENSIONS.items()))))
     assert regimes.version() == base                                  # dictionary order does not matter

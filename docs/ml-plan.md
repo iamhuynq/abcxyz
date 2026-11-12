@@ -343,3 +343,91 @@ Done as planned, with the reviewer's additional conditions. Full suite: 638 pass
     before the cutoff, and each ordering and embargo violation.
   - Every fold that `folds()` produces (expanding, rolling, embargo 0) passes the same check.
 - **Mutation check.** 47 mutations (38 earlier plus 9 new), all caught by an assertion.
+
+## PR #10 third review (external, 2026-11-12, head `116dacc`): assessment and plan
+
+**Verified.**
+- `build(..., factor_params, regime_params)` accepts overrides and forwards them to `build_factors` and
+  `build_regimes`, but `feature_builds` records neither.
+- `quant build` (`cli.py`) always uses the defaults; only tests pass other values. So no production build is
+  known to be non-default, but the database cannot prove it.
+- The ML source versions hash the code defaults, not the parameters that built the database. A build made with
+  other parameters would be accepted under the default version.
+
+**Decision: option A (persist the effective configuration), with option B's strictness for unknown builds.**
+
+1. **`build.py`.** `feature_builds` gets four nullable columns:
+   - `factor_params`: canonical JSON of the `FactorParams` actually used;
+   - `regime_params`: the same for `RegimeParams`;
+   - `factors_version`: `factors.version()` at build time;
+   - `regimes_version`: the regime definition version at build time.
+
+   The insert names its columns. A fresh build writes them. Older history rows are carried over `BY NAME`, so
+   they keep NULL, which means unknown.
+2. **Regime definition version.** `regimes.version()` stops hashing the `RegimeParams` defaults: it becomes the
+   definitions only (SQL, code, `DIMENSIONS`, `TERCILE_DIMENSIONS`), like `factors.version()`. The parameters
+   enter the ML source version separately, as for factors. `regimes.version()` is new in this PR, so nothing
+   stored depends on it.
+3. **ML source versions as a function of definitions plus parameters.**
+   - `allowlist.factor_source_version(params)` = `f1:<factors.version()>:<digest(params)>`.
+   - `allowlist.regime_source_version(params)` = `<regimes.version()>:<digest(params)>`.
+   - Approved means the current definitions with the default parameters. `FeatureSpec` and `BaselineSpec`
+     accept only the approved versions, as now.
+4. **New `ml/builds.py`: `build_source_versions(con, build_id)`.** It reads the stored row and returns the
+   effective version of each approved table:
+   - `stock_features` gets `feature_set_version`;
+   - `stock_factors` and `market_regimes` get their version from the stored definitions and parameters.
+
+   It raises when the row is missing or any of the four columns is NULL (a legacy or unknown build is never
+   treated as default). `check_build(con, build_id, dataset)` refuses a dataset when any feature's approved
+   version differs from the build's effective version. PR #11 calls it before reading any feature.
+5. **`factors.version()` is unchanged.** A test pins that it does not depend on `FactorParams`.
+
+**Tests**, on synthetic builds:
+- the default build records the approved versions, and `check_build` accepts it;
+- a build with a changed `FactorParams` value records different metadata, and `check_build` refuses the
+  factor features and the baseline factor;
+- the same with a changed `RegimeParams` value, refused for the regime features;
+- a legacy row (the four columns NULL) is refused;
+- a rebuild keeps the history rows;
+- `factors.version()` is unchanged by `FactorParams`.
+
+**Consequence for the real store.** The current `research.duckdb` was built before these columns existed, so ML
+refuses it until the next `quant build`, which runs with the defaults and records them. The daily pipeline
+rebuilds it.
+
+### PR #10 third review fixes: result (2026-11-12)
+
+Done as planned. Full suite: 646 passed (638 before).
+
+- **`feature_builds` records the effective configuration.** Four nullable columns: `factor_params` and
+  `regime_params` (canonical JSON of the parameters actually passed to `build()`), `factors_version` and
+  `regimes_version`. The insert names its columns. Older rows are carried over `BY NAME` with NULL.
+- **Definitions are split from parameters.**
+  - `regimes.version()` now hashes the definitions only (SQL, code, `DIMENSIONS`, `TERCILE_DIMENSIONS`), like
+    `factors.version()`, which is unchanged.
+  - The ML source versions are `factor_source_version(params, definitions)` and
+    `regime_source_version(params, definitions)`. Their defaults (current definitions, default parameters) are
+    the approved versions; `FeatureSpec` and `BaselineSpec` use them.
+- **`ml/builds.py`.**
+  - `build_source_versions(con, build_id, schema)` computes each table's effective version from the stored row.
+  - It raises `ContractError` for a missing build, a row with NULL metadata, or a `feature_builds` table without
+    the columns at all.
+  - `check_build(con, build_id, dataset, baseline)` refuses any feature, or the baseline, whose approved version
+    differs from the build's.
+- **Found while checking the real store.** The real `research.duckdb` has the old schema without the new
+  columns. The first version of `build_source_versions` raised a DuckDB `BinderException` there instead of a
+  `ContractError`, so the columns are now checked first, with a test on an old-schema table.
+  - The real build is refused with "feature_builds has no factor_params, ... rebuild with `quant build`", as
+    planned. The next `quant build` records the defaults.
+- **Tests (`test_ml_builds.py`, 8).**
+  - A default build is recorded and accepted.
+  - A build with other `FactorParams` is refused for factor features and for the baseline, while its default
+    regimes are accepted; a build with other `RegimeParams` is refused for regime features.
+  - NULL metadata, the old schema and a missing build are all refused.
+  - A rebuild keeps history rows (legacy NULL).
+  - The schema-attached database works.
+  - `factors.version()` does not depend on `FactorParams`.
+- **Mutation check.** 55 mutations, all caught: 47 earlier, 2 re-anchored, the regime-params mutation retired
+  (parameters left that hash by design), and 9 new.
+  - The old-schema mutation is caught by DuckDB's error, which is exactly the failure the check prevents.

@@ -42,12 +42,23 @@ EXCLUDED: dict[str, str] = {
 }
 
 
-def factor_source_version() -> str:
-    """The one version of stock_factors used by FeatureSpec and BaselineSpec: the factor set, factors.version() (the
-    SQL and definitions) and a canonical hash of every FactorParams default (scoring universe, minimum stocks and
-    industry size, winsor level). factors.version() is left unchanged: recorded interaction runs store it."""
+def factor_source_version(params=None, definitions: str | None = None) -> str:
+    """The version of stock_factors: the factor set, the definitions (factors.version(): SQL and factors) and a
+    canonical hash of every FactorParams field. Defaults: the current definitions with the default parameters, which
+    is the approved version used by FeatureSpec and BaselineSpec. A build's effective version passes its stored
+    definitions and parameters (ml/builds.py). factors.version() is left unchanged: recorded interaction runs
+    store it."""
     from quant_research.ml.canonical import digest
-    return f"{factors.FACTOR_SET}:{factors.version()}:{digest(factors.FactorParams())[:8]}"
+    params = factors.FactorParams() if params is None else params
+    return f"{factors.FACTOR_SET}:{definitions or factors.version()}:{digest(params)[:8]}"
+
+
+def regime_source_version(params=None, definitions: str | None = None) -> str:
+    """The version of market_regimes: the definitions (regimes.version()) and a canonical hash of every RegimeParams
+    field; defaults as for factor_source_version."""
+    from quant_research.ml.canonical import digest
+    params = regimes.RegimeParams() if params is None else params
+    return f"{definitions or regimes.version()}:{digest(params)[:8]}"
 
 
 def source_version(table: str) -> str:
@@ -56,7 +67,7 @@ def source_version(table: str) -> str:
     if table == "stock_factors":
         return factor_source_version()
     if table == "market_regimes":
-        return regimes.version()
+        return regime_source_version()
     raise KeyError(table)
 
 

@@ -18,6 +18,7 @@ nav = st.navigation([
     st.Page(HERE / "pages" / "research.py", title="Research"),
     st.Page(HERE / "pages" / "cross.py", title="Cross-stock"),
     st.Page(HERE / "pages" / "backtest.py", title="Backtest and paper"),
+    st.Page(HERE / "pages" / "risk.py", title="Risk"),
     st.Page(HERE / "pages" / "daily.py", title="Daily report"),
 ])
 with st.sidebar:

@@ -183,6 +183,29 @@ Registry). Summary:
     - an invalid run cannot be invalidated again;
     - the decile tie-break is one constant, shared by both selections and by provenance;
     - 483 tests pass; 34 mutations in all, every one caught.
+- PR #7 (research integrity audit) merged into `main` (`da49c49`).
+- Risk Engine PR 1 (plan `risk-engine-plan.md`, branch `risk-engine`, PR #8):
+  - `quant risk evaluate --paper | --backtest RUN`: limits under the default policy `default/v2` (provisional;
+    `default/v1` kept for reproducibility), liquidity,
+    drawdown under both valuations, and VaR / ES once 250 returns exist;
+  - status PASS / WARNING / BREACH / INCOMPLETE: missing data never passes;
+  - additive `risk_*` tables, runs of kind `risk`, no hypotheses logged;
+  - paper portfolio at 2026-11-09: INCOMPLETE. Concentration, liquidity and drawdown pass. Beta is unavailable
+    because CAR has a short history, and 7 of the 20 holdings are outside the cluster universe;
+  - 520 tests pass; 22 mutations, all caught. A stale-bytecode pitfall in the mutation loop was found and fixed;
+  - PR 2: stress scenarios, UI panel, construction-grid integration;
+  - PR #8 review fixes (same branch):
+    - policy `default/v2` splits the historical drawdown from the current write-down drawdown;
+    - unclustered weight is reported (paper: 36.2%), and the cluster limit stays INCOMPLETE while any holding
+      lacks a cluster;
+    - unvalued positions, or a reconciliation gap above 1% of NAV, make the position limits INCOMPLETE;
+    - non-finite returns give no VaR;
+    - cost fallback weight is reported;
+    - float tolerance at the thresholds;
+    - 531 tests pass; 32 mutations, all caught.
+  - Second review fixes: the paper portfolio's traded-mark curve is required. A curve that cannot be measured
+    (missing marks) makes the historical drawdown limit INCOMPLETE instead of being skipped. README and STATUS
+    name `default/v2` as the default. 534 tests pass; 34 mutations, all caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

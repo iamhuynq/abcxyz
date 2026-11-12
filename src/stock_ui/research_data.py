@@ -3,6 +3,7 @@
 import duckdb
 import pandas as pd
 
+from quant_research import paper_state
 from stock_ui.db import Reader, ReadResult
 
 LIFT_HORIZON = "exec_excess_10d"
@@ -197,16 +198,4 @@ def interactions(reader: Reader) -> ReadResult:
     return reader.read("results", "interactions", _interactions)
 
 
-def current_paper_date(con: duckdb.DuckDBPyConnection):
-    """The paper record `quant daily` marked as current. Three states:
-    - state row present: its paper_date, including an explicit NULL (no valid paper record right now);
-    - no state row (no paper_state table, or a run that failed after creating it): the latest run_date, as
-      before paper_state existed;
-    - no paper table: None."""
-    if _has(con, "paper_state"):
-        row = con.execute("SELECT paper_date FROM paper_state WHERE id = 1").fetchone()
-        if row is not None:
-            return row[0]
-    if not _has(con, "paper_daily"):
-        return None
-    return con.execute("SELECT max(run_date) FROM paper_daily").fetchone()[0]
+current_paper_date = paper_state.current_paper_date      # moved to quant_research (Risk Engine uses it)

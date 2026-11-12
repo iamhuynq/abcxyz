@@ -262,12 +262,14 @@ Registry). Summary:
     names, `model_code_hash` scope, exact `float64` feature and label columns, an immutable fitted state;
   - 787 tests pass; 69 mutations, all caught;
 - PR #12 merged into `main` (`b840980`).
-- PR #13, ML walk-forward runner (branch `ml-walk-forward`, not pushed; plan, decisions and result in `ml-plan.md`):
+- PR #13, ML walk-forward runner (branch `ml-walk-forward`, open, not merged; plan, decisions and result in `ml-plan.md`):
   - `quant ml run EXPERIMENT.json`: preflight before any write, purged folds checked on their exact frames,
     baseline sign from training rows only, one primary incremental rank-IC test (Newey-West, lag h - 1);
   - one result per experiment and dataset; crash-safe lifecycle (atomic run directory, then p-value and
     `finish_run` in one transaction);
-  - 827 tests pass; 31 mutations, all caught;
+  - review fixes: run artifacts verified by file hashes and by recomputation (optionally from the fold models),
+    finite paired samples, duplicate keys refused, a per-experiment lock, metric definitions;
+  - 848 tests pass; 45 mutations, all caught;
   - before a real run: `quant build` (the current `research.duckdb` predates the PR #10 build metadata);
   - next: PR #14, performance analysis of the persisted predictions.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,

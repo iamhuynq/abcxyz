@@ -39,8 +39,8 @@ def _frame(n_dates, n_stocks, seed=0, signal=0.0):
     for d in _days(n_dates):
         b = rng.normal(size=n_stocks)
         y = signal * b + rng.normal(size=n_stocks)
-        rows += [(d, b[i], y[i], y[i] + rng.normal()) for i in range(n_stocks)]
-    return pd.DataFrame(rows, columns=["date", "baseline", "label", "prediction"])
+        rows += [(d, f"S{i:03d}", b[i], y[i], y[i] + rng.normal()) for i in range(n_stocks)]
+    return pd.DataFrame(rows, columns=["date", "symbol", "baseline", "label", "prediction"])
 
 
 def test_thirty_stocks_with_a_baseline_make_a_date():
@@ -126,3 +126,40 @@ def test_primary_test_is_newey_west_with_lag_horizon_minus_one():
 def test_primary_label_names_the_target():
     assert ev.primary_label("fwd_ret_exec_5d") == "ml_incremental_rank_ic_fwd_ret_exec_5d"
     assert ev.PRIMARY_TEST in __import__("quant_research.ml.contracts", fromlist=["x"]).PRIMARY_TESTS
+
+
+@pytest.mark.parametrize("column", ["label", "baseline", "prediction"])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_the_thirty_stock_rule_counts_finite_paired_rows(column, bad):
+    f = pd.concat([_frame(1, 31, seed=7), _frame(1, 31, seed=8).assign(date=D0 + timedelta(days=1))],
+                  ignore_index=True)
+    f.loc[[0], column] = bad                                                # date 1: 30 finite pairs remain
+    f.loc[[31, 32], column] = bad                                           # date 2: 29 remain
+    daily, counts = ev.daily_incremental_ic(f, 1)
+    assert daily["date"].tolist() == [D0] and daily["n"].tolist() == [30]
+    assert counts["too_few_stocks_dates"] == 1 and counts["valid_dates"] == 1
+    if column != "prediction":                                              # the training sign sample
+        tr = ev.eligible(f, ("baseline", "label"))
+        assert tr["date"].unique().tolist() == [D0] and len(tr) == 30
+        ic = ev.daily_baseline_ic(f)
+        g = f[(f["date"] == D0) & np.isfinite(f[["baseline", "label"]]).all(axis=1)]
+        assert ic.index.tolist() == [D0] and ic.iloc[0] == ev.rank_ic(g["baseline"], g["label"])
+
+
+def test_duplicate_keys_are_refused():
+    f = _frame(2, 30, seed=9)
+    dup = pd.concat([f, f.iloc[[5]]], ignore_index=True)
+    for call in (lambda: ev.daily_incremental_ic(dup, 1), lambda: ev.daily_baseline_ic(dup),
+                 lambda: ev.eligible(dup)):
+        with pytest.raises(ContractError, match="duplicate"):
+            call()
+
+
+def test_eligible_dates_can_exceed_valid_dates():
+    f = _frame(3, 30, seed=10)
+    f.loc[f["date"] == D0, "prediction"] = 1.0                              # constant on one date
+    eligible = ev.eligible(f)["date"].nunique()                             # the preflight view (baseline only)
+    _daily, counts = ev.daily_incremental_ic(f, 1)
+    assert (eligible, counts["valid_dates"], counts["undefined_ic_dates"]) == (3, 2, 1)
+    assert set(ev.METRIC_DEFINITIONS) >= {"test_eligible_dates", "valid_dates", "undefined_ic_dates",
+                                          "too_few_stocks_dates"}

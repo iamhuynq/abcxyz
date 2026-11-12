@@ -1381,3 +1381,106 @@ the runner tests build a wider warehouse and run complete experiments.
   - No real-data run yet: `research.duckdb` must be rebuilt with `quant build` first.
   - A killed run stays `running` and blocks its experiment until it is inspected and invalidated, by design.
   - The synthetic data has no signal, so the test checks mechanics, not performance.
+
+## PR #13 review (external, 2026-11-12, head `40d4185`): assessment and plan
+
+Each point was checked against the code.
+
+1. **[P1] `verify_run` checks row counts only: confirmed.**
+   - A prediction or daily-IC file with the same row count but changed values or keys passes, and PR #14 will
+     read these files.
+   - Plan, two layers:
+     - **Integrity:** the manifest records a SHA-256 of every fold file (model, predictions, daily IC,
+       metrics), and `verify_run` recomputes them. This detects any accidental or deliberate change to a file.
+       It is not a signature: whoever rewrites the files and the manifest can recompute the hashes.
+     - **Consistency:** `verify_run` recomputes from the stored predictions:
+       - the prediction keys are unique within and across folds, and equal the recorded test-key hash;
+       - one model id and one baseline sign per fold, equal to the metrics;
+       - the daily IC, recomputed from predictions, baseline, sign and label, equals `daily_ic.parquet`
+         exactly;
+       - the fold means equal the metrics;
+       - the primary test, recomputed from the concatenated daily IC, equals the manifest's.
+   - Optional `verify_run(path, dataset)`: with the verified dataset, every stored prediction is also
+     recomputed from its loaded model (`predict_model`) and must be identical. PR #14 can use it.
+   - Tests: changing one prediction value, one label, one key, one daily-IC value or the primary p-value, each
+     with the row count kept, is refused; the recompute-from-model check catches a prediction file regenerated
+     with consistent hashes.
+2. **[P1, conditional] Finite labels: the invariant holds, and it will be made explicit.**
+   - `01_daily_panel.sql` drops rows with any price <= 0 or `adj_ratio <= 0`, so `adj_open > 0` and the labels
+     (`close / open - 1`) are finite whenever they are not NULL.
+   - A DuckDB `DOUBLE` divided by 0 gives `inf` (checked), so this invariant is what keeps them finite. NULL
+     labels are excluded by `label_null`.
+   - Plan:
+     - every IC sample is the finite paired sample: rows where the score, the baseline and the label (and,
+       after prediction, the prediction) are all finite;
+     - the 30-stock rule applies to that paired sample;
+     - in the preflight (test labels not read) the rule applies to finite baselines, and after prediction it
+       is applied again to the full paired sample. A date that falls below 30 is counted as
+       `too_few_stocks_dates`.
+   - Tests:
+     - NaN, `+inf` and `-inf` in the label, the baseline and the prediction;
+     - 29 versus 30 valid pairs;
+     - a dataset-boundary test: every kept label and feature of a built dataset is finite, including the
+       synthetic zero-price row.
+3. **[P2] Concurrent duplicate runs: partly confirmed.**
+   - Two processes cannot write `results.duckdb` at the same time (single writer), so they are serialized.
+   - Two connections in one process can both pass the pre-check, though.
+   - Plan: an `fcntl` lock (`ml/publish.acquire`) keyed by (`experiment_id`, dataset fingerprint), in an
+     `ml-locks` directory next to the results database. It is held from the pre-check to `finish_run`.
+   - A held lock refuses the run before anything is logged; the pre-check stays for its message.
+   - Tests: a subprocess holding the lock refuses the run and nothing is logged; after the holder dies, the run
+     proceeds.
+4. **[P2] Duplicate (`date`, `symbol`) rows in evaluation: confirmed.** The evaluation frames carry `symbol`, and
+   `daily_incremental_ic` / `daily_baseline_ic` refuse duplicate keys. Regression test included.
+5. **[P2] Eligible versus valid dates: confirmed as a naming gap.**
+   - Fold metrics will define:
+     - `test_eligible_dates`: preflight, finite baseline and at least 30 stocks;
+     - `valid_dates`: after prediction, the full finite paired sample with both ICs defined;
+     - `undefined_ic_dates` and `too_few_stocks_dates`: the post-prediction drops.
+   - The manifest carries these definitions.
+   - Test: a run with 70-session test windows and constant predictions on 3 dates per fold finishes `ok` with
+     `test_eligible_dates = 70 > valid_dates = 67` and `undefined_ic_dates = 3`.
+
+CI: run #51 was in progress at review time; `gh` is not available here, so the user confirms it.
+
+### PR #13 review fixes: result (2026-11-12)
+
+Full suite: 848 passed (827 before). `test_ml_evaluation.py` 18, `test_ml_runner.py` 28, one new test in
+`test_ml_training.py`.
+
+- **Artifact verification** (`ml/run_verify.py`, `verify_run(path, dataset=None)`):
+  - Integrity: the manifest has a `files` map, the SHA-256 of every fold file (lock files excluded), and every
+    hash is recomputed.
+  - Consistency, recomputed from the stored predictions:
+    - row count; one fold, model, sign and dataset per fold;
+    - test keys unique within and across folds, and equal to the recorded key hash;
+    - daily IC equal to `daily_ic.parquet`; counts and means equal to the fold metrics;
+    - the primary test equal to the manifest's.
+  - With the dataset, every prediction and label is also recomputed from the loaded fold model.
+  - The run's publish step verifies without the dataset: those predictions were just computed by the same code.
+  - Tests, each change keeping the row count:
+    - a sign flip of the predictions, permuted labels, a changed key, the sign, a daily-IC value, a dropped row,
+      a key repeated from another fold, an edited fold mean, an edited primary p-value, and another fold's
+      valid model in place of the right one are each refused. The file changes are caught by the hashes and,
+      after the hashes are rewritten, by the consistency layer.
+    - A coherent forgery (predictions cubed, so the ranks, daily IC, metrics, primary result and hashes all stay
+      consistent) passes without the dataset and is refused with it. Rank statistics cannot see a monotone
+      change; only the model recomputation can.
+- **Finite paired samples** (`evaluation.eligible(frame, columns)`):
+  - The 30-stock rule counts rows whose used values are all finite: baseline only in the preflight;
+    baseline and label for the sign; prediction, baseline and label for the test.
+  - The upstream invariant (prices <= 0 dropped by `01_daily_panel.sql`, so labels are finite) is documented
+    and tested at the dataset boundary.
+  - Tests: NaN, `+inf` and `-inf` in each column; 29 versus 30 finite pairs, for the test sample and the sign
+    sample.
+- **Duplicate keys.** Evaluation frames carry `symbol`; duplicate (`date`, `symbol`) rows are refused.
+- **Concurrent runs.** An `fcntl` lock per (`experiment_id`, dataset fingerprint) in `ml-locks/` next to the
+  results database is held from the pre-check to `finish_run`. Test: while a subprocess holds it, the run is
+  refused and nothing is logged; once the holder is killed, the run finishes `ok`.
+- **Eligible versus valid dates.** `evaluation.METRIC_DEFINITIONS` is stored in the run configuration and the
+  manifest. Test: 70-session windows with constant predictions on 3 dates per fold finish `ok` with
+  `test_eligible_dates = 70`, `valid_dates = 67` and `undefined_ic_dates = 3`.
+- **Mutation check.** 45 mutations, all caught: the 31 earlier ones (re-anchored, with one retired: the old
+  NaN-baseline rule, now part of the finite-pair rule) and 15 new ones. Six survived the first run (the sign
+  sample, and five verification checks whose tests matched another check's message or were missing) and were
+  caught after the tests were made specific.

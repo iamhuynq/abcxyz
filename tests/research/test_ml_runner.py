@@ -190,8 +190,9 @@ def test_the_label_is_declared_before_the_result(store, tmp_path, monkeypatch):
     real = evaluation.primary_test
 
     def spy(daily, horizon):
-        seen.append(_rows(store, "SELECT label, p_value FROM hypothesis_log"))
-        seen.append(_rows(store))
+        if not seen:                                                         # the run's computation (not verify)
+            seen.append(_rows(store, "SELECT label, p_value FROM hypothesis_log"))
+            seen.append(_rows(store))
         return real(daily, horizon)
     monkeypatch.setattr(evaluation, "primary_test", spy)
     run_id, _ = runner.run_experiment(store, SPEC, tmp_path / "runs", NOW)
@@ -244,8 +245,8 @@ def test_runs_are_reproducible(research, tmp_path):
         m = runner.verify_run(tmp_path / f"runs{i}" / run_id)
         preds = [pd.read_parquet(tmp_path / f"runs{i}" / run_id / "folds" / f"{f['fold']:03d}" / "predictions.parquet")
                  for f in m["folds"]]
-        drop = ("fold_seconds",)
-        out.append(({k: v for k, v in m.items() if k not in drop}, preds, primary))
+        m["files"] = {k: v for k, v in m["files"].items() if not k.endswith("model/model.json")}  # created_at
+        out.append(({k: v for k, v in m.items() if k != "fold_seconds"}, preds, primary))
     assert out[0][0] == out[1][0] and out[0][2] == out[1][2]
     for a, b in zip(out[0][1], out[1][1], strict=True):
         pd.testing.assert_frame_equal(a, b)
@@ -283,25 +284,159 @@ def test_a_logged_p_value_blocks_a_rerun(store, tmp_path):
         runner.run_experiment(store, SPEC, tmp_path / "runs", NOW)
 
 
-def test_verify_run_detects_a_damaged_run(store, tmp_path):
-    run_id, _ = runner.run_experiment(store, SPEC, tmp_path / "runs", NOW)
-    path = tmp_path / "runs" / run_id
-    model = path / "folds" / "001" / "model" / "model.json"
-    doc = json.loads(model.read_text())
-    doc["fitted"]["intercept"] = (1.0).hex()
-    model.write_text(json.dumps(doc))
-    with pytest.raises(runner.ContractError, match="model_id"):
-        runner.verify_run(path)
-    model.unlink()
-    with pytest.raises(runner.ContractError):
-        runner.verify_run(path)
-    pred = path / "folds" / "002" / "predictions.parquet"
-    pd.read_parquet(pred).iloc[:-1].to_parquet(pred, index=False)
+def _rewrite(path, rel, change):
+    f = path / rel
+    df = pd.read_parquet(f)
+    change(df)
+    df.to_parquet(f, index=False)
+
+
+def _rehash(path):
+    """An attacker or a bug that also rewrites the manifest hashes: only the consistency layer remains."""
     m = json.loads((path / "manifest.json").read_text())
-    m["folds"] = m["folds"][2:]
+    m["files"] = runner.file_hashes(path)
     (path / "manifest.json").write_text(json.dumps(m))
-    with pytest.raises(runner.ContractError, match="predictions are incomplete"):
+
+
+@pytest.fixture(scope="module")
+def published(research, tmp_path_factory):
+    d = tmp_path_factory.mktemp("published")
+    with ResultsStore(d / "results.duckdb", research) as s:
+        run_id, _ = runner.run_experiment(s, SPEC, d / "runs", NOW)
+        result = runner.build_dataset(s.con, SPEC.dataset, s.feature_build_id(), schema="rs.")
+    return d / "runs" / run_id, result
+
+
+def _copy(published, tmp_path):
+    import shutil
+    path, result = published
+    shutil.copytree(path, tmp_path / "run")
+    return tmp_path / "run", result
+
+
+@pytest.mark.parametrize("rel, change, why", [
+    ("folds/001/predictions.parquet", lambda df: df.__setitem__("prediction", -df["prediction"]),
+     "daily IC differs|metrics differ"),
+    ("folds/001/predictions.parquet", lambda df: df.__setitem__("label", df["label"].iloc[::-1].to_numpy()),
+     "daily IC differs|metrics differ"),
+    ("folds/001/predictions.parquet", lambda df: df.__setitem__("symbol", ["ZZZ"] + df["symbol"].tolist()[1:]),
+     "test keys differ from the recorded key hash"),
+    ("folds/001/predictions.parquet", lambda df: df.drop(df.index[-1], inplace=True),
+     "predictions are incomplete"),
+    ("folds/002/predictions.parquet", lambda df: df.__setitem__("baseline_sign", -df["baseline_sign"]),
+     "another fold, model, sign"),
+    ("folds/001/daily_ic.parquet", lambda df: df.__setitem__("incremental_ic", df["incremental_ic"] + 1e-12),
+     "daily IC differs"),
+])
+def test_a_changed_artifact_with_its_row_count_kept_is_refused(published, tmp_path, rel, change, why):
+    path, _ = _copy(published, tmp_path)
+    runner.verify_run(path)
+    _rewrite(path, rel, change)
+    with pytest.raises(runner.ContractError, match="do not match the hashes"):    # integrity layer
         runner.verify_run(path)
+    _rehash(path)
+    with pytest.raises(runner.ContractError, match=why):                          # consistency layer
+        runner.verify_run(path)
+
+
+def test_the_primary_result_and_cross_fold_keys_are_checked(published, tmp_path):
+    path, _ = _copy(published, tmp_path)
+    m = json.loads((path / "manifest.json").read_text())
+    m["primary"]["p"] = 0.001
+    (path / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(runner.ContractError, match="primary test differs"):
+        runner.verify_run(path)
+    path2, _ = _copy(published, tmp_path / "b")
+    first = pd.read_parquet(path2 / "folds/000/predictions.parquet")
+
+    def reuse_fold0_keys(df):                                                # 5 keys of fold 0 reappear in fold 1
+        df.loc[:4, "date"] = first["date"].iloc[:5].to_numpy()
+        df.loc[:4, "symbol"] = first["symbol"].iloc[:5].to_numpy()
+    _rewrite(path2, "folds/001/predictions.parquet", reuse_fold0_keys)
+    _rehash(path2)
+    with pytest.raises(runner.ContractError, match="duplicate test keys"):
+        runner.verify_run(path2)
+    path3, _ = _copy(published, tmp_path / "c")
+    m = json.loads((path3 / "manifest.json").read_text())
+    m["folds"][1]["incremental_mean_ic"] += 0.01                              # the manifest is not hashed
+    (path3 / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(runner.ContractError, match="metrics differ"):
+        runner.verify_run(path3)
+    path4, _ = _copy(published, tmp_path / "d")
+    import shutil
+    shutil.rmtree(path4 / "folds/001/model")
+    shutil.copytree(path4 / "folds/002/model", path4 / "folds/001/model")      # another valid model
+    _rehash(path4)
+    with pytest.raises(runner.ContractError, match="model does not match its metrics"):
+        runner.verify_run(path4)
+
+
+def test_predictions_regenerated_with_consistent_hashes_are_caught_with_the_dataset(published, tmp_path):
+    path, result = _copy(published, tmp_path)
+    runner.verify_run(path, result)
+    # a coherent forgery: shift every prediction of fold 3 and recompute daily IC, metrics, primary and hashes
+    from quant_research.ml import evaluation
+    from quant_research.ml.run_verify import eval_frame, fold_means
+    _rewrite(path, "folds/003/predictions.parquet", lambda df: df.__setitem__("prediction", df["prediction"] ** 3))
+    pred = pd.read_parquet(path / "folds/003/predictions.parquet")
+    m = json.loads((path / "manifest.json").read_text())
+    fold = next(f for f in m["folds"] if f["fold"] == 3)
+    daily, counts = evaluation.daily_incremental_ic(eval_frame(pred), fold["baseline_sign"])
+    daily.to_parquet(path / "folds/003/daily_ic.parquet", index=False)
+    fold.update(counts, **fold_means(daily))
+    series = [pd.read_parquet(path / f"folds/{f['fold']:03d}/daily_ic.parquet").assign(
+        date=lambda x: pd.to_datetime(x["date"]).dt.date) for f in m["folds"]]
+    m["primary"] = json.loads(json.dumps(evaluation.primary_test(pd.concat(series, ignore_index=True), 5)))
+    (path / "manifest.json").write_text(json.dumps(m))
+    _rehash(path)
+    runner.verify_run(path)                                                  # consistent without the dataset
+    with pytest.raises(runner.ContractError, match="differ from the model and dataset"):
+        runner.verify_run(path, result)
+
+
+HOLD = ("import fcntl, os, sys, time\n"
+        "os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n"
+        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(60)\n")
+
+
+def test_a_concurrent_run_of_the_same_pair_is_refused_and_logs_nothing(store, tmp_path):
+    import subprocess
+    import sys
+    _, ds, _, _ = _prepared(store)
+    lock = tmp_path / "ml-locks" / f"{SPEC.experiment_id}-{ds.fingerprint}.lock"
+    holder = subprocess.Popen([sys.executable, "-c", HOLD, str(lock)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        with pytest.raises(runner.ExperimentRefused, match="being run by another process"):
+            runner.run_experiment(store, SPEC, tmp_path / "runs", NOW)
+        assert _rows(store) == [] and _rows(store, "SELECT * FROM hypothesis_log") == []
+    finally:
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+    run_id, _ = runner.run_experiment(store, SPEC, tmp_path / "runs", NOW)   # the kernel released the lock
+    assert _rows(store) == [(run_id, "ok")]
+
+
+def test_preflight_eligible_dates_can_exceed_valid_dates_in_a_finished_run(research, tmp_path, monkeypatch):
+    real = training.predict_model
+
+    def flat_three_days(trained, dataset, rows):
+        out = real(trained, dataset, rows)
+        out.loc[out["date"].isin(sorted(out["date"].unique())[:3]), "prediction"] = 0.0
+        return out
+    monkeypatch.setattr(training, "predict_model", flat_three_days)
+    spec = _spec(test_sessions=70, step_sessions=70)
+    with ResultsStore(tmp_path / "results.duckdb", research) as s:
+        run_id, _ = runner.run_experiment(s, spec, tmp_path / "runs", NOW)
+        assert _rows(s) == [(run_id, "ok")]
+    m = json.loads((tmp_path / "runs" / run_id / "manifest.json").read_text())
+    assert m["metric_definitions"]["valid_dates"].startswith("after prediction")
+    for f in m["folds"]:
+        assert f["test_eligible_dates"] == 70 and f["valid_dates"] == 67 and f["undefined_ic_dates"] == 3
 
 
 def test_a_fold_left_below_60_dates_after_prediction_fails_the_run(research, tmp_path, monkeypatch):
@@ -313,9 +448,9 @@ def test_a_fold_left_below_60_dates_after_prediction_fails_the_run(research, tmp
         out.loc[out["date"].isin(first), "prediction"] = 0.0
         return out
     monkeypatch.setattr(training, "predict_model", flat_first_days)
-    with ResultsStore(tmp_path / "results.duckdb", research) as s:
-        with pytest.raises(runner.ContractError, match="valid dates after prediction"):
-            runner.run_experiment(s, SPEC, tmp_path / "runs", NOW)
+    with (ResultsStore(tmp_path / "results.duckdb", research) as s,
+          pytest.raises(runner.ContractError, match="valid dates after prediction")):
+        runner.run_experiment(s, SPEC, tmp_path / "runs", NOW)
     with ResultsStore(tmp_path / "results.duckdb", research) as s:
         (run_id, status), = _rows(s)
         assert status == "failed" and _rows(s, "SELECT p_value FROM hypothesis_log") == [(None,)]

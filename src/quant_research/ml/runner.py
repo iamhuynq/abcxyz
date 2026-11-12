@@ -13,6 +13,7 @@
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -23,7 +24,7 @@ import pandas as pd
 
 from quant_research.ml import artifacts, evaluation, publish, training
 from quant_research.ml.builds import check_build
-from quant_research.ml.canonical import digest, normalize
+from quant_research.ml.canonical import normalize
 from quant_research.ml.contracts import (
     RESEARCH_END,
     ContractError,
@@ -32,11 +33,20 @@ from quant_research.ml.contracts import (
     SplitSpec,
 )
 from quant_research.ml.dataset import build_dataset
+from quant_research.ml.run_verify import (
+    RUN_SCHEMA,
+    eval_frame,
+    file_hashes,
+    fold_dir,
+    fold_means,
+    key_hash,
+    verify_run,
+)
 from quant_research.ml.splits import Fold, check_fold, folds, purge
 from quant_research.results import ResearchParams, ResultsStore
 
-RUN_SCHEMA = "ml-run/1"
 INTERVAL = ["date", "label_start", "label_end"]
+__all__ = ["RUN_SCHEMA", "ExperimentRefused", "preflight", "run_experiment", "verify_run"]
 
 
 class ExperimentRefused(ContractError):
@@ -91,7 +101,7 @@ def preflight(ds: training.Dataset, baseline: np.ndarray, calendar: list[date], 
         raise ExperimentRefused(f"test_sessions {split.test_sessions} < {evaluation.MIN_DATES} valid dates per fold")
     if len(baseline) != len(ds.data):
         raise ExperimentRefused("the baseline is not aligned with the dataset")
-    data, d = ds.data, _dates(ds.data["date"])
+    data, d, sym = ds.data, _dates(ds.data["date"]), ds.data["symbol"].astype(str).to_numpy()
     plans, seen = [], np.zeros(len(data), dtype=bool)
     for f in folds(calendar, split):
         cand = np.flatnonzero((d >= f.train_start) & (d <= f.train_end))
@@ -104,12 +114,12 @@ def preflight(ds: training.Dataset, baseline: np.ndarray, calendar: list[date], 
         if seen[test_rows].any():
             raise ExperimentRefused(f"fold {f.index}: a test row was already tested by an earlier fold")
         seen[test_rows] = True
-        test_keys = pd.DataFrame({"date": d[test_rows], "baseline": baseline[test_rows]})
+        test_keys = pd.DataFrame({"date": d[test_rows], "symbol": sym[test_rows], "baseline": baseline[test_rows]})
         eligible_dates = evaluation.eligible(test_keys)["date"].nunique()
         if eligible_dates < evaluation.MIN_DATES:
             raise ExperimentRefused(f"fold {f.index}: {eligible_dates} test dates with >= {evaluation.MIN_STOCKS} "
                                     f"stocks with a baseline, fewer than {evaluation.MIN_DATES}")
-        train = pd.DataFrame({"date": d[train_rows], "baseline": baseline[train_rows],
+        train = pd.DataFrame({"date": d[train_rows], "symbol": sym[train_rows], "baseline": baseline[train_rows],
                               "label": data[ds.label].to_numpy(dtype=np.float64)[train_rows]})
         try:
             sign, mean_ic, n_dates = evaluation.baseline_sign(train)
@@ -134,11 +144,7 @@ def previous_runs(store: ResultsStore, experiment_id: str, fingerprint: str, lab
 
 def _key_hash(data: pd.DataFrame, rows: np.ndarray) -> str:
     sel = data.iloc[rows]
-    return digest([[d, s] for d, s in zip(_dates(sel["date"]), sel["symbol"].astype(str), strict=True)])
-
-
-def _fold_dir(tmp: Path, i: int) -> Path:
-    return tmp / "folds" / f"{i:03d}"
+    return key_hash(_dates(sel["date"]), sel["symbol"].astype(str).to_numpy())
 
 
 def _run_folds(tmp: Path, result, plans: list[FoldPlan], baseline: np.ndarray, model: ModelSpec,
@@ -150,13 +156,11 @@ def _run_folds(tmp: Path, result, plans: list[FoldPlan], baseline: np.ndarray, m
         pred.insert(0, "fold", p.fold.index)
         pred["baseline_score"] = baseline[p.test_rows]
         pred["baseline_sign"] = p.sign
-        frame = pd.DataFrame({"date": _dates(pred["date"]), "prediction": pred["prediction"],
-                              "baseline": pred["baseline_score"], "label": pred["label"]})
-        daily, counts = evaluation.daily_incremental_ic(frame, p.sign)
+        daily, counts = evaluation.daily_incremental_ic(eval_frame(pred), p.sign)
         if counts["valid_dates"] < evaluation.MIN_DATES:
             raise ContractError(f"fold {p.fold.index}: {counts['valid_dates']} valid dates after prediction, "
                                 f"fewer than {evaluation.MIN_DATES}")
-        out = _fold_dir(tmp, p.fold.index)
+        out = fold_dir(tmp, p.fold.index)
         out.mkdir(parents=True)
         artifacts.save_model(trained, out / "model")
         pred.to_parquet(out / "predictions.parquet", index=False)
@@ -170,9 +174,7 @@ def _run_folds(tmp: Path, result, plans: list[FoldPlan], baseline: np.ndarray, m
              "test_keys_hash": _key_hash(result.data, p.test_rows),
              "baseline_sign": p.sign, "baseline_train_mean_ic": p.train_mean_ic,
              "baseline_train_valid_dates": p.train_valid_dates, "test_eligible_dates": p.test_eligible_dates,
-             **counts, "model_id": trained.model_id,
-             "model_mean_ic": float(daily["model_ic"].mean()), "baseline_mean_ic": float(daily["baseline_ic"].mean()),
-             "incremental_mean_ic": float(daily["incremental_ic"].mean()),
+             **counts, "model_id": trained.model_id, **fold_means(daily),
              "artifact_schema": artifacts.SCHEMA_VERSION}
         (out / "metrics.json").write_text(json.dumps(m, default=str, sort_keys=True, indent=1))
         metrics.append(m)
@@ -180,20 +182,10 @@ def _run_folds(tmp: Path, result, plans: list[FoldPlan], baseline: np.ndarray, m
     return metrics, pd.concat(series, ignore_index=True)
 
 
-def verify_run(path: Path) -> dict:
-    """Read a run directory back: the manifest, every fold model (model_id recomputed) and its files."""
-    manifest = json.loads((Path(path) / "manifest.json").read_text())
-    if manifest.get("schema") != RUN_SCHEMA:
-        raise ContractError(f"{path}: unsupported run schema {manifest.get('schema')!r}")
-    for m in manifest["folds"]:
-        out = _fold_dir(Path(path), m["fold"])
-        if artifacts.load_model(out / "model").model_id != m["model_id"]:
-            raise ContractError(f"{path}: fold {m['fold']} model does not match its metrics")
-        if len(pd.read_parquet(out / "predictions.parquet")) != m["test_rows"]:
-            raise ContractError(f"{path}: fold {m['fold']} predictions are incomplete")
-        if len(pd.read_parquet(out / "daily_ic.parquet")) != m["valid_dates"]:
-            raise ContractError(f"{path}: fold {m['fold']} daily IC is incomplete")
-    return manifest
+def _lock_dir(store: ResultsStore, runs_dir: Path) -> Path:
+    """`ml-locks` next to the results database (one lock namespace per results database)."""
+    row = store.con.execute("SELECT path FROM duckdb_databases() WHERE database_name = current_database()").fetchone()
+    return (Path(row[0]).parent if row and row[0] else Path(runs_dir)) / "ml-locks"
 
 
 def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, now: datetime) -> tuple[str, dict]:
@@ -210,6 +202,21 @@ def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, no
     ds = training.open_dataset(result)
     baseline = load_baseline(store.con, spec, ds.data)
     plans = preflight(ds, baseline, load_calendar(store.con, spec), spec.split)
+    lock_dir = _lock_dir(store, Path(runs_dir))
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock = lock_dir / f"{spec.experiment_id}-{ds.fingerprint}.lock"
+    try:                                  # one runner per (experiment, dataset): held until finish_run
+        fd = publish.acquire(lock, lock)
+    except FileExistsError:
+        raise ExperimentRefused(f"experiment {spec.experiment_id} on dataset {ds.fingerprint} is being run by "
+                                "another process; nothing was logged") from None
+    try:
+        return _run_locked(store, spec, model, build_id, result, ds, baseline, plans, Path(runs_dir), now)
+    finally:
+        os.close(fd)
+
+
+def _run_locked(store, spec, model, build_id, result, ds, baseline, plans, runs_dir: Path, now) -> tuple[str, dict]:
     label, horizon = evaluation.primary_label(ds.label), spec.dataset.label.horizon
     blocking = previous_runs(store, spec.experiment_id, ds.fingerprint, label, Path(runs_dir))
     if blocking:
@@ -220,7 +227,8 @@ def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, no
     config = {"experiment": normalize(spec), "experiment_id": spec.experiment_id, "model_spec": normalize(model),
               "dataset_fingerprint": ds.fingerprint, "split_version": spec.split.version, "label": label,
               "baseline_policy": evaluation.BASELINE_POLICY, "min_stocks": evaluation.MIN_STOCKS,
-              "min_dates": evaluation.MIN_DATES, "run_schema": RUN_SCHEMA, "model_code_hash": training.model_code_hash()}
+              "min_dates": evaluation.MIN_DATES, "run_schema": RUN_SCHEMA, "model_code_hash": training.model_code_hash(),
+              "metric_definitions": evaluation.METRIC_DEFINITIONS}
     store.start_run(run_id, "ml", "research", ResearchParams(), now, (spec.experiment_id, ds.fingerprint), config)
     store.log_hypothesis(run_id, label, "research", None, now)                  # declared before any result
 
@@ -234,7 +242,7 @@ def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, no
                     "dataset_metadata": json.loads(json.dumps(dict(result.metadata), default=str)),
                     "folds": metrics, "primary": out["primary"],
                     "dataset_verifications": 1 + 2 * len(plans),
-                    "fold_seconds": round(time.perf_counter() - started, 3)}
+                    "fold_seconds": round(time.perf_counter() - started, 3), "files": file_hashes(tmp)}
         (tmp / "manifest.json").write_text(json.dumps(manifest, default=str, sort_keys=True, indent=1))
 
     target = Path(runs_dir) / run_id

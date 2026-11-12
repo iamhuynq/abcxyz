@@ -1130,3 +1130,254 @@ Full suite: 787 passed (786 before).
   - the JSON round trip is exact;
   - non-sequences are refused.
 - Mutation check: 69 mutations, all caught (2 new: no tuple copy, no sequence type check).
+
+## PR #13: walk-forward runner (plan, 2026-11-12)
+
+Input: the external PR #13 plan. Branch `ml-walk-forward` from `main` at `b840980` (PR #12 merged). This
+section maps that plan onto the code and records the points it leaves open.
+
+### Audit
+
+- **Splits.** `folds(calendar, split)`, `purge(train, fold)`, `check_fold(train, test, fold, split)` and
+  `session_offset` exist and are tested. Embargo is `embargo_sessions` before the test start; training labels end
+  strictly before it.
+- **Models.** `fit_model` / `predict_model` work on row positions of one verified dataset (PR #12).
+  `ExperimentSpec(model, params, seed)` maps to `ModelSpec(model, params, seed)`; it accepts only `ridge` and
+  `elasticnet`.
+- **Run lifecycle.**
+  - `ResultsStore.start_run(run_id, kind, period, params: ResearchParams, now, pattern)` stores
+    `stored_params(params)` plus provenance; it has no slot for an ML experiment configuration.
+  - `finish_run` sets `ok`; an exception sets `failed`; runs are never deleted (`invalidate`).
+  - `log_hypothesis` stores a NaN or None p-value as NULL, which keeps it on record but outside the FDR family.
+  - `hypothesis_q` counts only tests of `ok` runs.
+  - Every logged engine refuses a second run of the same configuration until the earlier one is invalidated
+    (`already_run` in interactions and portfolio).
+- **Rank IC convention.** `interactions.daily_ic`: Spearman as Pearson on average ranks, at least 30 stocks per
+  date (`MIN_STOCKS = 30`). `stats.mean_test(series, lag)`: Newey-West, `None` when fewer than 3 values or the
+  standard error is undefined.
+- **Baseline.**
+  - `BaselineSpec(factor, source_version, field)` names a Factor Engine score in `rs.stock_factors`. The ML
+    dataset does not contain it unless it is also a model feature.
+  - Factors carry a sign note, not an expected-return orientation; `reversal_1w`, for example, is "high =
+    recent loser".
+- **Fixtures.** The PR #11 synthetic warehouse has 4 stocks: its dataset can never reach 30 stocks per date.
+- **Real data.** `research.duckdb` still predates the PR #10 build metadata, so ML refuses it until the next
+  `quant build` (run by the user).
+
+### Points the external plan leaves open (to approve)
+
+1. **Where the baseline score comes from.** Read the `BaselineSpec` field from `rs.stock_factors`, read-only, for
+   the test rows' exact (`date`, `symbol`) keys. Checks:
+   - the dataset's `build_id` must be the build in `research.duckdb` (`check_build` as for the dataset);
+   - `BaselineSpec.source_version` must equal the dataset's recorded `stock_factors` source version, so model and
+     baseline come from one build.
+   - A missing baseline value removes the row from both model and baseline IC (the intersection rule of the
+     external plan).
+2. **Baseline orientation (a decision).** "Model IC minus baseline IC" is unfair whenever the factor's IC is
+   negative: the model learns its signs, while the baseline would be scored as if high meant better. Options:
+   - **(A, recommended)** In each fold, the baseline's sign is the sign of its mean daily rank IC on that fold's
+     purged training rows. It is learned with the same information the model has and never from test labels,
+     then frozen for the test window and recorded in the fold metrics.
+   - (B) A sign declared in the experiment. This adds a field to `BaselineSpec` and changes `experiment_id`;
+     declaring it without looking at data is hard, and research-period evidence would be chosen with
+     hindsight.
+   - (C) No orientation: the comparison is biased for any negatively signed factor.
+3. **Validity decided before any fit.** Which rows are usable depends only on the dataset's keys and the
+   baseline's presence; predictions and dataset labels are always finite. So the stock count per date and the
+   valid dates per fold are computed before fitting.
+   - If any fold has fewer than 60 valid dates, or `test_sessions < 60`, or the test windows overlap
+     (`step_sessions < test_sessions`), the experiment is refused before a run starts and nothing is logged.
+   - Dates with fewer than 30 stocks are dropped and counted.
+   - A date where model predictions or baseline scores are constant has no defined IC. It is dropped for both
+     and counted (`undefined_ic_dates`), because this depends on features only. If drops then leave a fold
+     below 60 valid dates, the run fails; it is never re-cut.
+4. **One run per experiment and dataset.** As in the other engines, a second run of the same `experiment_id` on
+   the same dataset fingerprint is refused while an earlier `ok` or `running` run exists; invalidate it first.
+   Changing parameters after a result is a new experiment and a new logged test, visible in `quant audit fdr`.
+5. **Storing the experiment in the run.** `start_run` gains an optional, additive `config: dict | None`, stored
+   next to the parameters; existing runs and callers are unchanged. ML runs store `ExperimentSpec` (canonical),
+   `experiment_id`, the dataset fingerprint and the split version. `kind = "ml"`, `period = "research"`,
+   pattern `(experiment_id, model_code_hash)`.
+6. **Order of persistence.**
+   - `start_run`, then the primary label is logged with a NULL p-value (declared before any result exists).
+   - Folds are computed into a temporary run directory: fold models via `save_model`, `predictions.parquet`
+     and `metrics.json` per fold.
+   - Then the primary test is computed, `manifest.json` written, and the directory published atomically
+     (`ml/publish.py`) at `data/ml/runs/<run_id>`.
+   - Then the p-value is logged and `finish_run` called.
+   - The manifest holds no status: `research_runs` is the only source of truth, so a published directory of a
+     run that later failed is never mistaken for a valid run.
+   - An exception leaves the run `failed` with its test outside the FDR family, as for every engine.
+7. **Fixtures.**
+   - A synthetic warehouse with at least 40 stocks and enough sessions for real folds, built through the normal
+     pipeline (factors included) for the integration test.
+   - Hand-made, resealed datasets for the edge cases (29 or 30 stocks, 59 or 60 dates, ties, constant vectors).
+   - The 30 and 60 thresholds are constants of the primary-test definition, recorded in the run.
+
+### Design
+
+- `ml/evaluation.py`, pure functions:
+  - `rank_ic(x, y)`: average ranks, then Pearson; NaN when either side is constant.
+  - `baseline_sign(train_rows, baseline, labels)`;
+  - `daily_incremental_ic(predictions, baseline, labels, sign)`: identical samples, counts of dropped dates;
+  - `primary_test(series, horizon)`: `stats.mean_test(series, horizon - 1)`.
+- `ml/runner.py`:
+  - `plan_folds(dataset, calendar, split, baseline)`: fold rows, purge, `check_fold` on the exact frames, and
+    the validity counts, all before any fit;
+  - `run_experiment(store, spec, ...)`: lifecycle, duplicate guard, per-fold fit and predict (labels joined only
+    after prediction), artifacts, primary test.
+- CLI: `uv run quant ml run <experiment.json>`. The JSON names everything (dataset features, label, period,
+  split, model, params, seed, baseline, hypothesis); nothing is defaulted. It prints the run id, status, fold
+  count, primary label and artifact path.
+- Verification cost: count the full dataset verifications and time them in the integration test, then report
+  them. The cost is about 2 verifications per fold; no fast path is added in this PR.
+- No change to the Factor Engine, the Risk Engine, econ, portfolio, backtest, the warehouse schema, or the
+  validation and holdout gates.
+
+### Tests (summary)
+
+- Fold planning:
+  - expanding and rolling folds; overlapping test windows refused;
+  - purge with a suspended symbol; rows just before, on and after `embargo_start`;
+  - `check_fold` called on the exact frames;
+  - the cutoff rule;
+  - `test_sessions < 60` refused.
+- Leakage:
+  - test labels mutated give identical predictions and baseline signs;
+  - rows outside the fold's training set mutated give an identical fit;
+  - the baseline sign uses training rows only;
+  - model and baseline use the same keys on every date, including when a baseline value is missing.
+- Statistics:
+  - hand-computed Spearman with ties;
+  - a constant vector is undefined and counted;
+  - 29 versus 30 stocks; 59 versus 60 dates;
+  - incremental IC equals model minus signed baseline;
+  - the Newey-West lag is `horizon - 1`;
+  - exactly one hypothesis row per run.
+- Lifecycle:
+  - the label is logged with NULL before the result;
+  - a failure leaves the run `failed` and outside FDR;
+  - the duplicate run is refused;
+  - an invalidated run allows a rerun;
+  - atomic run directory, never overwritten;
+  - reproducible fold boundaries, key hashes, model ids and predictions.
+- Integration: a full run on the larger synthetic warehouse, with the verification count and time.
+- Mutation check on every guard; full suite.
+
+### PR #13: approved decisions (2026-11-12)
+
+The user approved the plan with option A and these refinements; they override the points above where they differ.
+
+1. **Baseline direction (A).**
+   - For each fold, the daily Spearman IC of the baseline score against the label is computed on the fold's
+     purged training rows: dates with at least 30 stocks that have a finite baseline, and a defined IC.
+   - Their mean over dates (each date weighs the same) gives the sign: > 0 keeps the score, < 0 negates it.
+   - A mean of exactly 0, or fewer than 60 valid training dates, fails the fold; no sign is chosen by default.
+   - The sign is fixed for the fold's whole test window. Fold metrics record the raw mean IC, the sign and the
+     number of valid training dates.
+   - Test labels are never used for it.
+2. **Preflight, before any run or hypothesis row.**
+   - Checks:
+     - unique keys;
+     - non-overlapping test windows (`step_sessions >= test_sessions`);
+     - `test_sessions >= 60`;
+     - baseline coverage;
+     - stocks per test date (at least 30 with a baseline);
+     - valid test dates per fold (at least 60);
+     - every fold's `check_fold` on the exact purged frames;
+     - the baseline sign rule above.
+   - Any failure rejects the whole experiment.
+   - The preflight reads training labels (for the sign) and test keys only, never test labels.
+3. **Idempotency: one research result per experiment and dataset.**
+   - Runs are identified by `pattern_name = experiment_id` and `pattern_version = dataset fingerprint`.
+   - A new run is refused when an earlier run of the pair:
+     - is `ok` (a result exists);
+     - is `running` (in progress, or killed: inspect, then invalidate);
+     - has a non-NULL primary p-value logged;
+     - or has a published run directory (a result was computed).
+   - A run that `failed` before any result (NULL p-value, no directory) allows a retry. Its hypothesis row stays
+     NULL, and only `ok` runs enter `hypothesis_q`, so a retry adds no test to the FDR family.
+   - Invalidation (with a reason, for an established defect) remains the only way past a result.
+   - A different configuration, baseline policy or method is a new `experiment_id` and a new test in the global
+     FDR family. The baseline policy and the thresholds are recorded in the run's configuration.
+4. **Run lifecycle.**
+   - `start_run(..., config=None)` is backward compatible: without `config` the stored row and config hash are
+     unchanged.
+   - `research_runs` is the only source of truth for status; the manifest has no status.
+   - Order:
+     - start the run;
+     - log the primary label with NULL;
+     - compute every fold into a temporary directory;
+     - publish the run directory atomically;
+     - then, in one transaction, log the p-value and `finish_run`.
+   - A crash at any step leaves either no directory, or a directory with the run not `ok`, which the
+     idempotency rule refuses to rerun. A run is never `ok` without its directory, and the label is one
+     `(run_id, label)` row, so it is never logged twice.
+
+### Result, PR #13 (2026-11-12)
+
+Branch `ml-walk-forward` from `b840980`. Full suite: 827 passed (787 before, 40 new: `test_ml_evaluation.py` 7,
+`test_ml_runner.py` 19, `test_ml_experiment_file.py` 14). The suite now takes about 3 minutes (2 before), because
+the runner tests build a wider warehouse and run complete experiments.
+
+- **`ml/evaluation.py`.**
+  - `rank_ic` (average ranks, Pearson; NaN when constant) and `eligible` (30 stocks with a finite baseline per
+    date).
+  - `baseline_sign` (mean of daily training ICs, each date weighted equally; a mean of 0 or fewer than 60 dates
+    fails).
+  - `daily_incremental_ic` (identical rows for model and baseline, dropped dates counted).
+  - `primary_test` (`stats.mean_test`, lag `horizon - 1`, chronological and unique dates, undefined fails).
+- **`ml/runner.py`.**
+  - `load_calendar` and `load_baseline` query only the dataset period.
+  - `preflight` builds the folds and checks every refusal of the approved decisions before any write.
+  - `previous_runs` applies the idempotency rule.
+  - `run_experiment` runs the approved lifecycle: start, NULL label, folds into a temporary directory, atomic
+    publish (`verify_run` reloads every fold model), then p-value and `finish_run` in one transaction.
+  - `check_build` covers the baseline.
+- **`ml/experiment_file.py`, `ml/cli.py`.** `quant ml run EXPERIMENT.json` takes a file with exact keys and no
+  defaults. Refusals exit with code 2 and log nothing.
+- **`results.py`.** `start_run(..., config=None)`: additive; without `config` the stored row and config hash are
+  unchanged (tested).
+- **Run artifacts** (`<data dir>/ml/runs/<run_id>/`):
+  - `manifest.json` (no status): experiment, ids, dataset metadata, fold metrics, primary result, verification
+    count;
+  - per fold: `model/model.json`, `predictions.parquet` (with `baseline_score` and `baseline_sign`),
+    `daily_ic.parquet`, `metrics.json`.
+- **Verification cost.**
+  - One run on the wide synthetic warehouse (45 stocks, 520 sessions, about 20,000 dataset rows, 6 folds) does
+    13 full dataset verifications (1 + 2 per fold). The folds take about 2.2 s and the whole run about 3 s.
+  - From the PR #12 measurement (5.6 s per 500,000 rows), a real research dataset with 25 folds would spend
+    about 5 minutes on verification. That is acceptable for a run that happens once per experiment, so no
+    verified-dataset handle is added.
+- **Tests.**
+  - The real run logs one test, finishes `ok`, and enters `hypothesis_q` once. Each fold model is fitted on
+    exactly its purged training rows (row count and key hash), and test keys never repeat across folds.
+  - `check_fold` receives the exact frames.
+  - Mutating this fold's and later test labels changes neither the earlier folds' baseline signs nor this
+    fold's fit and predictions.
+  - Preflight refusals log nothing: overlapping windows, `test_sessions` of 59, the training row minimum, too few
+    stocks, a zero mean sign, a test row tested twice.
+  - Idempotency: a rerun is refused; a different seed is a new experiment; after invalidation a rerun is
+    allowed and the FDR family counts 2 tests.
+  - The label is NULL and the run `running` while the result is computed.
+  - A technical failure before the result allows a retry that adds one FDR test only. A crash after publishing
+    leaves the run `failed`, rolls back the p-value and blocks a rerun. A killed `running` run or a logged
+    p-value blocks a rerun.
+  - A fold left below 60 dates after prediction fails the run.
+  - Reproducibility across two stores: manifest, predictions and primary result are identical.
+  - `verify_run` detects a damaged model or incomplete predictions.
+  - The CLI runs once, then refuses.
+- **Mutation check.** 31 mutations over the evaluation, runner, idempotency, lifecycle, artifact and `start_run`
+  code, all caught. Three survived the first run (two refusals whose tests matched the wrong message, and the
+  post-prediction date minimum) and were caught after the tests were made specific.
+- **Hard constraints kept.**
+  - Every query is bounded by the dataset period, which is at most 2023-12-31.
+  - No validation or holdout read.
+  - Point-in-time data through the PR #11 builder only.
+  - Fit on purged training rows only.
+  - Test labels are read only from `predict_model` output, after prediction. The preflight reads training labels
+    (for the baseline sign) and test keys and baseline scores only.
+- **Limitations.**
+  - No real-data run yet: `research.duckdb` must be rebuilt with `quant build` first.
+  - A killed run stays `running` and blocks its experiment until it is inspected and invalidated, by design.
+  - The synthetic data has no signal, so the test checks mechanics, not performance.

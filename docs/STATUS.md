@@ -261,7 +261,15 @@ Registry). Summary:
   - review fixes: a metadata contract checked whenever a trained model is built or used, approved fitted model
     names, `model_code_hash` scope, exact `float64` feature and label columns, an immutable fitted state;
   - 787 tests pass; 69 mutations, all caught;
-  - next: PR #13, the walk-forward runner.
+- PR #12 merged into `main` (`b840980`).
+- PR #13, ML walk-forward runner (branch `ml-walk-forward`, not pushed; plan, decisions and result in `ml-plan.md`):
+  - `quant ml run EXPERIMENT.json`: preflight before any write, purged folds checked on their exact frames,
+    baseline sign from training rows only, one primary incremental rank-IC test (Newey-West, lag h - 1);
+  - one result per experiment and dataset; crash-safe lifecycle (atomic run directory, then p-value and
+    `finish_run` in one transaction);
+  - 827 tests pass; 31 mutations, all caught;
+  - before a real run: `quant build` (the current `research.duckdb` predates the PR #10 build metadata);
+  - next: PR #14, performance analysis of the persisted predictions.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

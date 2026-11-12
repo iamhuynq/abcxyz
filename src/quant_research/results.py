@@ -228,9 +228,16 @@ class ResultsStore:
         return row[0] if row else None
 
     def start_run(self, run_id: str, kind: str, period: str, params: ResearchParams, now: datetime,
-                  pattern: tuple[str, str] | None = None) -> None:
-        config = json.dumps(stored_params(params), default=str, sort_keys=True)
-        stored = {**stored_params(params), "provenance": self.provenance(config)}
+                  pattern: tuple[str, str] | None = None, config: dict | None = None) -> None:
+        """`config`: an engine's own configuration (the ML experiment), stored under "config" and covered by the
+        config hash. Without it the stored row and the hash are exactly as before."""
+        base = stored_params(params)
+        if config is not None:
+            if not isinstance(config, dict) or "config" in base:
+                raise ValueError("config must be a dict")
+            base = {**base, "config": config}
+        config_json = json.dumps(base, default=str, sort_keys=True)
+        stored = {**base, "provenance": self.provenance(config_json)}
         self.con.execute(
             "INSERT INTO research_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL)",
             [run_id, kind, pattern[0] if pattern else None, pattern[1] if pattern else None, period,

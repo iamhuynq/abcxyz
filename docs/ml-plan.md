@@ -497,3 +497,166 @@ An empty build provenance value is refused, never replaced.
   - explicit empty arguments to the helpers.
 - Both mutations are caught: checking only `None` in builds, and dropping the empty-value check in the helpers.
   The full suite has 662 passing tests.
+
+## PR #11: dataset builder (plan, 2026-11-12)
+
+Source: the external spec "PR #11 - ML Dataset Builder" (branch `ml-dataset-builder` from `3bbbda5`).
+
+### Audit
+
+- `pyarrow` is already a dependency, so Parquet needs nothing new.
+- `stock_targets` does not expose the entry and exit dates: `d1` to `d20` are computed inside
+  `04_stock_targets.sql` and dropped.
+- The masks exist per horizon: `fwd_has_price_jump_{1,3,5,10,20}d` and `crosses_period_{1,3,5,10,20}d`, plus
+  `entry_blocked`.
+- Feature rows are dated by their decision date. There is no separate availability column: point in time comes
+  from the tested SQL, the allowlist and the source versions.
+- The real `research.duckdb` still has the old `feature_builds` schema, so ML refuses it until the next
+  `quant build`.
+
+### Decisions (to approve)
+
+1. **Label intervals without approximation and without changing the target SQL.**
+   - The builder derives `label_start` (`lead(date, 1)`) and `label_end` (`lead(date, h)`) from `daily_panel`
+     with the same window as `04_stock_targets.sql`: `PARTITION BY symbol ORDER BY date`, the symbol's own rows.
+   - A test checks, on the synthetic build, that the interval reproduces the label: `close[label_end] /
+     open[label_start] - 1 == fwd_ret_exec_{h}d`. It also checks a symbol with gaps (the dropped zero-price row)
+     and the last sessions.
+   - `stock_targets` itself is not changed; changing it would change the feature-build code hash and every
+     source version.
+2. **Exclusions are sequential**, each row under its first reason, in this order, with input = retained + sum:
+   1. missing label interval (no `h`-th session);
+   2. NULL executable label;
+   3. `entry_blocked`;
+   4. `fwd_has_price_jump_{h}d`;
+   5. `crosses_period_{h}d`, or a label end past the dataset period or the research cutoff;
+   6. outside the point-in-time universe (`ResearchParams().point_in_time_sql()`, the `DatasetSpec` universe);
+   7. a NULL required feature.
+
+   Overlapping counts are reported as diagnostics. No row is dropped any other way, and nothing is filled.
+   NULL features are excluded by rule 7, not imputed.
+3. **API.** `build_dataset(con, spec, build_id, schema="rs.") -> DatasetResult(data, metadata, fingerprint,
+   exclusions)`.
+   - `check_build` runs first.
+   - Identifiers come only from the validated specs; values are bound as parameters.
+   - `check_unique` and `check_point_in_time` (`feature_date` = the source row's date) run on the result.
+4. **Artifact (optional).** `write_dataset(result, path)` writes `<path>.parquet` and `<path>.json` (metadata)
+   atomically (temporary file, then rename). It refuses an existing path. The fingerprint covers the canonical
+   logical content (sorted rows, every value) and the provenance, not the Parquet bytes.
+5. **Fingerprint and metadata.**
+   - The spec fingerprint, ordered features with their versions, label and horizon, `build_id`, the effective
+     source versions, `code_hash`, `warehouse_sha`, `data_as_of`, row counts, exclusions and `contract: ml/1`.
+   - No wall-clock time.
+   - Empty or NULL provenance fails closed (already in `ml/builds.py`; `warehouse_sha` is added to that check).
+6. **Read-only.** Every database is opened read-only. No table, view or row is written.
+
+### Tests
+
+Tests use synthetic builds and cover the spec's list: provenance, row integrity, labels and intervals,
+exclusion accounting, and artifact behaviour. Every new test is mutation-checked.
+
+### PR #11 plan review (external, 2026-11-12): revisions
+
+**Checked in `04_stock_targets.sql` (the reviewer's blocker).**
+- `fwd_ret_exec_{h}d = lead(adj_close, h) / lead(adj_open, 1) - 1`, over `daily_panel` with
+  `PARTITION BY symbol ORDER BY date` (lines 10-12, 26, 37). The builder reads the same table and columns, so the
+  prices come from the same source.
+- `entry_blocked`, `fwd_has_price_jump_{h}d` and `crosses_period_{h}d` are separate flags (lines 48, 59, 71).
+  None of them makes the label NULL.
+- A label is NULL only when the symbol has no h-th later row. `daily_panel` drops non-positive prices, so there
+  is no other way. The masks are therefore never hidden by a NULL label. The revised order puts the known causes
+  first anyway, and a test proves that no masked row has a NULL label.
+
+**1. Interval definition (as the target SQL, which the label must reproduce).**
+- `label_start = lead(date, 1)`: the symbol's own next row after t (entry at its open).
+- `label_end = lead(date, h)`: the symbol's h-th own row after t (exit at its close). That is the (h-1)-th row
+  after `label_start`, not the h-th: `fwd_ret_exec_3d` enters at the open of t+1 and exits at the close of t+3.
+  The reviewer's wording ("h-th from `label_start`") would not reproduce the stored label.
+- The order comes from each symbol's own `daily_panel` rows, never a market-wide index.
+- If the h-th row is missing, there is no interval. That is reason 2, never inferred.
+- Test: `adj_close(label_end) / adj_open(label_start) - 1 == fwd_ret_exec_{h}d` to 1e-12, for every symbol and
+  every horizon (3, 5, 10, 20) of the synthetic build. That covers a late first trade (DEL, UPC), a row dropped
+  inside the series (STK's zero-price placeholder) and the series ends.
+
+**2. Exclusions: one status per row, first match wins, the order explicit in code.** A row is either `kept` or
+has exactly one `exclusion_reason`, assigned by an ordered tuple of named predicates evaluated in that order:
+1. `outside_universe`: fails the point-in-time universe at t (eligibility uses only data at t, so it comes first);
+2. `no_label_interval`: the symbol has no h-th later row (this is also when the label is NULL);
+3. `entry_blocked`;
+4. `price_jump_in_window`: `fwd_has_price_jump_{h}d`;
+5. `label_crosses_period`: `crosses_period_{h}d` (for a research dataset, this includes every label that starts
+   before 2023-12-31 and ends after it);
+6. `label_after_dataset_end`: `label_end` after `DatasetSpec.period_end` (within research, when the dataset
+   ends earlier);
+7. `label_null`: residual, a NULL label with an interval (expected 0; counted, never filled);
+8. `feature_null`: a required feature is NULL.
+
+The table gives the count and the share of input rows for each reason, plus `input_rows = kept_rows +
+excluded_rows`. A test proves the reconciliation and that every row has exactly one status.
+
+**3. Universe: point in time, from row data at t only.**
+- It is `ResearchParams().point_in_time_sql()`: traded at t, ADV20 at t > 1 bn, more than 20 own sessions, no
+  price jump at t, not the bad source date.
+- `daily_panel` keeps delisted stocks (459 covered, `audit pit`), so no current membership list is used.
+- Stated limitation (integrity finding E-1): exchange and industry are current values. The universe filter does
+  not use them, but industry-based features (`z_industry`) do.
+- The universe SQL text is in the `DatasetSpec` fingerprint (PR #10) and in the metadata.
+
+**4. API.** `build_dataset(con, spec, build_id, schema) -> DatasetResult`, with:
+- `data` (kept rows: keys, features in spec order, label, `label_start`, `label_end`);
+- `metadata` (read-only mapping);
+- `fingerprint`;
+- `exclusions` (ordered: reason, count, share);
+- `input_rows`, `kept_rows`, `excluded_rows`.
+
+`check_build` runs before any dataset read and checks every source the spec uses; `warehouse_sha` is added to
+the non-empty provenance check. It never runs `quant build`. A test compares the database file's hash before and
+after the call.
+
+**5. Artifact: one atomic directory.**
+- `write_dataset(result, path)` writes `data.parquet` and `metadata.json` into a temporary sibling directory,
+  verifies both, and renames the directory to `path` in one step. `path` must not exist.
+- A failure before the rename leaves no `path`, and the temporary directory is removed.
+- `read_dataset(path)` recomputes the content hash and refuses a mismatch with the metadata fingerprint.
+- Tests:
+  - the target already exists;
+  - a failure while writing the metadata;
+  - a failure before the rename (patched);
+  - a tampered value or a mismatched fingerprint is refused on read.
+
+**6. Fingerprint = canonical hash of provenance plus logical content.**
+- Provenance: contract `ml/1`, dataset schema version `dataset/1`, spec fingerprint, ordered columns with
+  feature versions, label and horizon, `build_id`, effective source versions, `code_hash`, `warehouse_sha`,
+  `data_as_of`, the ordered exclusion counts, and the row count.
+- Content: rows sorted by `(date, symbol)`, each serialized canonically (ISO dates, floats as `float.hex`, NULL
+  as null, string labels as-is) and fed into SHA-256 in column order.
+- Tests:
+  - changing one feature value, the column order, the label, the build or the warehouse SHA changes the
+    fingerprint;
+  - identical inputs give the same fingerprint, across processes as well.
+
+### PR #11: final clarifications before implementation (2026-11-12, plan approved)
+
+1. **`outside_universe` is reachable and is not a join condition.**
+   - Candidate rows are every `daily_panel` row `(date, symbol)` in the dataset period: every session from the
+     symbol's first to its last traded date, including no-trade sessions.
+   - The universe is `ResearchParams().point_in_time_sql()`, evaluated on that row's `stock_features` values at
+     t: traded at t, `adv_value_20 > 1 bn`, `session_index > 20`, no price jump at t, not 2025-07-16.
+   - A candidate fails it on a no-trade day, when illiquid, in its first 20 sessions, or on a price-jump day.
+     These cases are frequent, so the reason is real.
+   - Features are left-joined on `(date, symbol)`. A missing feature value falls under `feature_null`, never a
+     silent drop.
+   - Source and version of the universe: the SQL text, already in the `DatasetSpec` fingerprint, and the build.
+2. **`z_industry` is removed from the default allowlist.** The 9 `<factor>.z_industry` entries are removed until
+   a point-in-time industry history exists, because they use the current ICB classification. The limitation is
+   stated in `allowlist.py`, in the dataset metadata (`limitations`) and here. The allowlist test is updated
+   (18 factor entries).
+3. **Every exclusion reason is always in the metadata, in the declared order, count 0 included.** Test: a
+   dataset where some reasons do not occur still lists all 8, and the counts reconcile with the input rows.
+4. **Intervals come from the full series.** `label_start` and `label_end` are computed with `lead()` over each
+   symbol's complete `daily_panel` series (all its rows, before any period filter or exclusion), and only then
+   joined to the candidates.
+   - A test removes candidate rows (a dataset period that starts mid-series, and excluded rows) and checks that
+     the intervals of the kept rows are unchanged and still reproduce `fwd_ret_exec_{h}d`.
+
+Scope unchanged: no model training, no experiment runner.

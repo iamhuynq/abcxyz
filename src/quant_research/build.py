@@ -6,7 +6,9 @@ Phase 2 can never change Phase 1 data. Every build is a full rebuild (adj_ratio 
 retroactively by the source, so incremental feature updates would be wrong).
 """
 
+import dataclasses
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -19,7 +21,9 @@ import duckdb
 from fireant_crawler.store.migrations import plan_schema_changes
 from quant_research.backtest.costs import build_cost_inputs
 from quant_research.factors import FactorParams, build_factors
+from quant_research.factors import version as factors_version
 from quant_research.regimes import RegimeParams, build_regimes
+from quant_research.regimes import version as regimes_version
 
 FEATURE_SET_VERSION = "v2"  # v2: 2026 split into holdout (<= 2026-10-02) and forward
 SQL_PACKAGE = "quant_research"
@@ -95,8 +99,19 @@ CREATE TABLE IF NOT EXISTS feature_builds (
     feature_rows        BIGINT,
     target_rows         BIGINT,
     seconds             DOUBLE,
-    warehouse_sha       VARCHAR
+    warehouse_sha       VARCHAR,
+    -- Added 2026-11-12 (ML foundation): the effective factor / regime configuration of this build (canonical JSON
+    -- of the parameters actually passed) and the definition versions. NULL on older rows: unknown, never default.
+    factor_params       VARCHAR,
+    regime_params       VARCHAR,
+    factors_version     VARCHAR,
+    regimes_version     VARCHAR
 )"""
+
+
+def params_json(params) -> str:
+    """Canonical JSON of a parameter dataclass (sorted keys, fixed separators)."""
+    return json.dumps(dataclasses.asdict(params), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _remove_db(path: Path) -> None:
@@ -146,9 +161,13 @@ def build(warehouse_path: Path, research_path: Path, now: datetime,
             build_id = now.strftime("%Y%m%dT%H%M%S")
             seconds = round(time.monotonic() - started, 2)
             con.execute(
-                "INSERT OR REPLACE INTO feature_builds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT OR REPLACE INTO feature_builds (build_id, feature_set_version, built_at, data_as_of,
+                       warehouse_fetched_at, code_hash, panel_rows, feature_rows, target_rows, seconds, warehouse_sha,
+                       factor_params, regime_params, factors_version, regimes_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [build_id, FEATURE_SET_VERSION, now, data_as_of, fetched, feature_build_hash(),
-                 rows["daily_panel"], rows["stock_features"], rows["stock_targets"], seconds, before],
+                 rows["daily_panel"], rows["stock_features"], rows["stock_targets"], seconds, before,
+                 params_json(factor_params), params_json(regime_params), factors_version(), regimes_version()],
             )
             con.commit()
         except BaseException:

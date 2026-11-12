@@ -1,0 +1,499 @@
+# ML research layer, Step 9 (plan, 2026-11-12)
+
+Source: the external spec "ML Research Layer Plan" (roadmap step 9, 2026-11-12). This document holds the audit
+of what the repository already provides, the decisions the spec asks for (its section 11), and the scope of
+PR #10 (ML foundation and research contract). PR #11 to #15 get their own plan sections when they start.
+
+## 1. Preconditions
+
+- **The project review's ML policy (section 36) is met.** ML comes after the Factor, Regime and Interaction
+  engines, portfolio construction, economic validation and reproducibility. All of them are built.
+- **The economic context is unchanged.** No signal tested so far survives realistic costs (STATUS). An ML model
+  is one more model family under the same rules: it must beat the Factor Engine baseline out of sample and
+  after costs, and its tests count in the multiple-testing family.
+- **Research integrity applies as is.**
+  - Research period up to 2023-12-31.
+  - Validation 2024-2025 (used twice) and the holdout (used once) are frozen.
+  - New ideas are confirmed only by a pre-registration on forward data (from 2026-10-03).
+
+## 2. Audit: what ML can reuse
+
+| Need | Existing | Use |
+|---|---|---|
+| Point-in-time features at the close of t | `stock_features` (30 features), `stock_factors` (9 factors: value, rank, z, industry z), `market_regimes` (6 dimensions) | Feature sources. All three are classified point-in-time in `tests/research/test_integrity.py`, and their perturbation tests cover every column. |
+| Labels | `stock_targets`: `fwd_ret_exec_{3,5,10,20}d` (enter at the open of t+1, exit at the close of t+h, the symbol's own sessions), `fwd_excess_exec_{5,10,20}d`, the per-horizon masks `fwd_has_price_jump_{h}d` / `crosses_period_{h}d`, `entry_blocked` | Label sources (outcome table). An incomplete window is NULL (tested). |
+| Decision and execution timing | Decision at the close of t, entry at the open of t+1, T+2, exit at a close (`docs/research-integrity.md` section 2) | The same convention, nothing new. |
+| Point-in-time universe | `ResearchParams.point_in_time_sql()`: traded, ADV20 > 1 bn, more than 20 sessions, no jump, not the bad source date | The default universe. Exchange and industry are current values (integrity finding E-1): a stated limitation. |
+| Periods and gates | `daily_panel.period`, `check_period`, `--prereg` / `--final`, the period-boundary test | ML folds live inside the research period. |
+| Runs, provenance, FDR | `research_runs` (lifecycle), `provenance.collect` (commit, data, code, config, env, selection), `hypothesis_log` / `hypothesis_q` (BH, BY), registry | An ML experiment is a run of kind `ml`, and its pre-declared primary test is logged. |
+| Not usable as features | Interaction Engine outputs (scan statistics, not per-row values); fundamentals and report dates (no publication time); Exposure and Risk outputs (portfolio-level) | Excluded. Cross-stock features (`cross.duckdb`) are point-in-time tested but live in another database: deferred to PR #11 as an option. |
+| Libraries | numpy, pandas, scipy, statsmodels. No scikit-learn and no gradient-boosting library. | Ridge (closed form) and ElasticNet (statsmodels `fit_regularized`) need nothing new. A tree model needs a dependency review in PR #12. |
+
+## 3. Decisions (spec section 11): recommendations
+
+1. **Decision time.** After the close of t, and features must be known at that close. The label is entered at
+   the open of t+1. This is the existing convention, everywhere.
+2. **Return convention.** The labels are the existing back-adjusted executable returns, gross of costs. Costs
+   apply only at the portfolio stage (cost model v1), as in the econ and portfolio engines.
+3. **Suspensions and delistings.** A label whose window runs past the symbol's last session is NULL and is
+   excluded; it is never filled with a stale price or a zero. Rows whose window holds a price jump, an
+   entry-blocked open or a period boundary are excluded through the existing per-horizon masks. The dataset
+   reports how many rows each rule removes.
+4. **Universe history.** The point-in-time universe above. The current exchange and industry are a stated
+   limitation, not fixable without a source.
+5. **Feature provenance.** Only columns of tables that the integrity tests classify as point-in-time
+   (`stock_features`, `stock_factors`, `market_regimes`). A feature spec naming any other source is refused.
+6. **Calendar.** Label intervals use the symbol's own sessions: `label_start` is the first session after t, and
+   `label_end` is the h-th. Purge uses the actual interval overlap; embargo is counted in market sessions
+   (`market_daily` dates).
+7. **Dependencies.** None in PR #10 or #11. PR #12 brings a written dependency review (size, license,
+   determinism) before any tree library.
+8. **Multiple testing.** Each ML experiment pre-declares one primary test, the incremental rank IC over the
+   Factor Engine baseline (Newey-West), and logs it in the global family, like a grid configuration. A sweep
+   of configurations logs one test per configuration. The experiment count is visible in `quant audit fdr`.
+9. **Holdout governance.**
+   - Every fold, including its label intervals, ends on or before 2023-12-31; a split that reaches past it is
+     refused.
+   - Validation and holdout are not available to ML.
+   - A model that passes is confirmed only by a pre-registration on forward data, like every other candidate.
+
+## 4. PR #10 scope: contracts, validation, split primitives
+
+New package `src/quant_research/ml/`. Pure Python, no database writes, no model, no portfolio change.
+
+- `contracts.py`: frozen dataclasses, each with a validator and a stable version hash (as `Pattern.version` /
+  `config_version`).
+  - `FeatureSpec(name, source, column, availability)`. The source must be one of the point-in-time tables.
+    Availability is `close_t` for all three; anything else is refused. A factor feature names the factor and the
+    field (`rank_pct`, `z`, `z_industry`).
+  - `LabelSpec(column, horizon, entry, exit, costs)`. The column must be in `stock_targets` with a horizon
+    suffix that matches. Entry is `open_t+1`, exit `close_t+h`, costs `gross`. It also names the mask rule.
+  - `DatasetSpec(features, label, universe, period_start, period_end)`. The period must lie within the
+    research period; feature names must be unique. Its fingerprint is a hash of the spec. The data identity
+    (warehouse SHA, feature build) is added when built (PR #11).
+  - `SplitSpec(kind = expanding | rolling, train_min_sessions, test_sessions, step_sessions, purge = interval,
+    embargo_sessions, last_date)`. There is no shuffle field at all. The split is refused when the last test
+    window ends after 2023-12-31, or when the embargo is below 0.
+  - `ExperimentSpec(hypothesis, dataset, split, model, params, seed, baseline, primary_test)`. It is refused
+    without a hypothesis, a baseline (the Factor Engine score named by its factor), a primary test or a seed.
+- `splits.py`: pure functions on a session calendar and on label intervals.
+  - `folds(calendar, split)`: deterministic fold boundaries.
+  - `purge(train_intervals, test_window, embargo)`: drops the training rows whose label interval overlaps
+    the test window, or the embargo after it. It works on actual dates, never on row counts.
+  - `check_fold(...)`: an assertion helper that later PRs call on every fold. It checks that training precedes
+    the test, that no interval overlaps, that the embargo is respected, and that the minimum training size is
+    met. It fails clearly rather than weakening a rule.
+- `keys.py`: `check_unique(df, ("date", "symbol"))` reports duplicates and refuses them;
+  `check_point_in_time(feature_dates, decision_dates)` refuses any feature row dated after its decision date.
+- Docs: a "Leakage threats" section in this plan, with every threat from the spec mapped to the rule or test
+  that blocks it, and the list of what PR #11 must add (the dataset builder's adversarial tests).
+
+Tests (`tests/research/test_ml_contracts.py`, `test_ml_splits.py`): every validator, with valid and invalid
+cases.
+- A feature from a table that is not point-in-time, or with availability `close_t+1`, is refused.
+- A label with a mismatched horizon is refused, and so is a period past 2023-12-31.
+- Duplicate keys are refused.
+- Fold boundaries are deterministic and chronological.
+- Purge on a hand-made calendar with gaps (a suspension): an interval ending inside the test window or inside
+  the embargo is dropped; one ending the day before is kept.
+- Too little training data fails.
+- Every new test is mutation-checked with `PYTHONDONTWRITEBYTECODE=1`.
+
+Not in PR #10: the dataset builder (PR #11), models (PR #12), the walk-forward runner (PR #13), analysis
+(PR #14), portfolio integration (PR #15, conditional). PR #10 changes no existing engine and no stored data.
+
+## 5. Acceptance (PR #10)
+
+- Invalid or ambiguous feature availability, a non-point-in-time source, a label horizon mismatch, a period
+  outside research, shuffling (impossible by construction), duplicate keys, purge overlap and a missing
+  embargo are all refused by a tested rule.
+- The experiment contract carries every provenance field of the spec. The data identity comes from the
+  existing `provenance.collect` at run time.
+- The full suite is green, CI is synthetic, and no existing engine behaviour changes.
+
+## 6. Plan review (external, 2026-11-12): additions to PR #10
+
+The review accepts the two decisions asked for: fold boundaries and purge in PR #10, and one primary test per
+ML experiment in the global FDR family. It adds three requirements, all taken into PR #10.
+
+### 6.1 The research cutoff is an invariant, not documentation
+
+- `RESEARCH_END` is read from `backtest.runner.PERIOD_RANGES["research"][1]` (2023-12-31), the boundary that
+  the integrity test already checks everywhere. It is never written again.
+- `DatasetSpec` and `SplitSpec` refuse an end date after it.
+- `folds()` refuses to produce a fold whose test window ends after it.
+- `check_fold()` refuses (raises, never warns) any training or test observation whose decision date **or
+  label end** is after it.
+- Tests:
+  - a fold ending exactly on 2023-12-31 is accepted;
+  - one ending on 2024-01-01 is refused;
+  - a fold whose training part is valid but whose test window crosses the cutoff is refused;
+  - an observation dated 2023-12-29 whose label ends in 2024 is refused.
+
+### 6.2 Features come from an explicit allowlist
+
+- `ml/allowlist.py` lists every approved feature column, table by table. Nothing is taken from a table
+  automatically: a column not listed is refused, even in an approved table.
+- Each entry records the source table, the column, the source version, the availability (`close_t`) and a
+  feature version (the hash of the entry).
+- Source versions:
+  - `stock_features`: `FEATURE_SET_VERSION` (`v2`);
+  - `stock_factors`: `factors.version()` (the hash of the factor definitions);
+  - `market_regimes`: a new `regimes.version()`, the same kind of hash over the regime SQL, dimensions and
+    default parameters. It is an additive function and changes no regime.
+- A feature spec whose source version differs from the current one is refused (a definition changed since
+  approval).
+- Excluded sources are refused at validation with a named reason:
+  - Interaction Engine outputs: scan statistics, not per-row values;
+  - `report_marks` and fundamentals: no publication time;
+  - Exposure and Risk outputs: portfolio-level;
+  - `stock_targets`: outcomes, never features;
+  - `cross.duckdb`: not approved in PR #10.
+- The initial allowlist holds:
+  - the 30 features of `stock_features` that the reference tests cover;
+  - the 9 factors x `rank_pct` / `z` / `z_industry`;
+  - the 6 regime states.
+  The flags and identity columns (`is_traded`, `limit_up`, `session_index`, `period`, ...) are excluded.
+
+### 6.3 Deterministic, versioned hashes
+
+- Canonical serialization: JSON with sorted keys and fixed separators. Tuples become lists, dates become ISO
+  strings, and floats use `repr`. A type outside this set is refused instead of being stringified.
+- Every hashed payload carries `contract: "ml/1"`.
+- The digest is SHA-256 (as `config_hash`), shown as 16 hex characters. Python's `hash()` is never used.
+- Tests:
+  - the same spec gives the same hash in two separate Python processes with different `PYTHONHASHSEED`
+    values;
+  - dict key order and date-versus-ISO-string inputs do not change the hash;
+  - every meaningful field changes it (each one is tested);
+  - the contract version changes it.
+
+The acceptance in section 5 is extended accordingly. No other change to the plan.
+
+## 7. Leakage threats and the rule that blocks each (PR #10)
+
+| Threat (spec) | Blocked by | Test |
+|---|---|---|
+| A feature known after its decision date | Only `close_t` features from approved point-in-time tables (allowlist, source version); `keys.check_point_in_time` refuses rows dated after their decision | `test_ml_contracts`: availability, source version, excluded sources, future feature rows |
+| An outcome used as a feature | `stock_targets` and `feature_target` are excluded sources | excluded-source test |
+| A source revised after the decision | Source versions: a feature approved under one definition is refused once it changes. Row-level revisions are covered by the integrity perturbation tests of the approved tables | source-version test |
+| A label interval overlapping the test period | `purge` uses actual label end dates; `check_fold` raises if any training label reaches the embargo gap or the test window | `test_ml_splits`: purge with a suspended symbol, check_fold cases |
+| Random shuffling | `SplitSpec.kind` is `expanding` or `rolling`; there is no shuffle field | split rules test |
+| Validation or holdout data | `RESEARCH_END` invariant in `DatasetSpec`, `SplitSpec`, `folds` and `check_fold`, including label ends | cutoff tests (2023-12-31 accepted, 2024-01-01 refused, test window or label crossing refused) |
+| Duplicate observations | `keys.check_unique` refuses them | key test |
+| A non-reproducible spec | Canonical SHA-256 hashes with the contract version | hash tests across processes |
+| Preprocessing fitted on the full dataset | Not in PR #10 (no preprocessing yet). PR #12 must fit on each fold's training rows only, with a test | to add in PR #12 |
+| A universe member before its membership date, a stale exit price | The point-in-time universe and NULL incomplete labels already exist; the dataset builder must keep them | adversarial tests to add in PR #11 |
+
+PR #11 adds the adversarial dataset tests:
+- a feature row dated one session late;
+- a revised source row;
+- a stock before its first traded date;
+- a missing exit price;
+- a duplicate key.
+
+## Result, PR #10 (2026-11-12)
+
+Branch `ml-foundation`. Full suite: 616 passed (565 before). The only change outside `ml/` is an additive
+`regimes.version()`; no engine behaviour and no stored data change.
+
+- `ml/canonical.py`:
+  - canonical JSON (sorted keys, fixed separators; ISO dates; tuples as lists; dataclasses by field; finite
+    floats only; any other type refused);
+  - contract `ml/1` wraps every payload; digest is SHA-256, 16 hex characters.
+- `ml/allowlist.py`:
+  - `stock_features`: the 30 reference-checked columns (a test ties the list to the reference test);
+  - `stock_factors`: 27 entries (9 factors x `rank_pct` / `z` / `z_industry`);
+  - `market_regimes`: the 6 states.
+  - Source versions: `v2`, `f1:<factors.version()>` and `regimes.version()`.
+  - Excluded sources are refused with a named reason; any other table or unlisted column is refused too.
+- `ml/contracts.py`: `FeatureSpec`, `LabelSpec` (executable `stock_targets` labels only, with a matching
+  horizon; entry `open_t+1`, exit `close_t+h`, gross, per-horizon masks), `DatasetSpec` (unique features, the
+  point-in-time universe, fingerprint including the universe SQL), `SplitSpec` (`expanding` or `rolling`, no
+  shuffle) and `ExperimentSpec` (hypothesis, approved model family, seed, Factor Engine baseline, declared
+  primary test). The research cutoff is checked on every date.
+- `ml/splits.py`:
+  - `folds` (deterministic; complete test windows only);
+  - `purge` (actual label ends);
+  - `check_fold` (raises on any leak, including the cutoff and label ends);
+  - `session_offset`.
+- `ml/keys.py`: `check_unique`, `check_point_in_time`.
+- Embargo semantics, made precise in the code: walk-forward training always precedes the test window, so the
+  embargo is a gap of `embargo_sessions` market sessions **before** the test start. Section 4 said "after";
+  that was an error, since nothing after the test window is ever trained on.
+- Tests: `test_ml_contracts.py` (35) and `test_ml_splits.py` (16).
+- Mutation check: 28 mutations, all caught.
+  - One first survived: the split-kind check, because `random` was refused for another reason. The test now
+    matches the message.
+  - Four are stopped by a second defence in the code rather than the first assertion:
+    - the fold guard after the cutoff filter;
+    - the date-type check (comparing a datetime raises);
+    - JSON `allow_nan=False` behind the finite-float check;
+    - the minimum-training-rows check.
+
+## PR #10 review (external, 2026-11-12, head `781d6be`): assessment and plan
+
+All four findings were reproduced on the branch:
+- mutating the caller's `params` dict changes `experiment_id`;
+- mutating the `features` list passed in changes the dataset fingerprint (it is stored as a list);
+- `hypothesis=None` raises `AttributeError`, not `ContractError`;
+- a split ending in 2015 is accepted for a dataset that ends in 2023.
+
+| Point | Assessment | Action |
+|---|---|---|
+| P1 specs are not deeply immutable | Valid | At construction, `params` becomes an immutable canonical form: nested dicts are converted to a read-only mapping (`MappingProxyType` of normalized values), lists to tuples, and unsupported types are refused. `DatasetSpec.features` is stored as a tuple of `FeatureSpec`, and anything else is refused. Tests: mutating the caller's dict or list (nested too) changes neither the spec nor its id, and the spec's own `params` cannot be modified. |
+| P1 the Factor Engine baseline is not pinned | Valid | `BaselineSpec(factor, field = rank_pct, source_version)`, validated like a feature: the factor must exist and the version must be the current `f1:<factors.version()>`. `ExperimentSpec.baseline` is a `BaselineSpec`, so the id covers the baseline version. Test: a different baseline version changes the id, and a stale version is refused. |
+| P2 dataset period and split boundaries are not cross-validated | Valid | `SplitSpec` gets a `first_date`. `ExperimentSpec` requires the split to cover the dataset exactly: `split.first_date == dataset.period_start` and `split.last_date == dataset.period_end` (no undeclared subset). `folds` uses only sessions in `[first_date, last_date]`. Tests: a split ending before the dataset end is refused, and a calendar starting before the dataset start yields no earlier session. |
+| P2 purge and embargo boundaries | Valid as explicitness; no defect | Contract stated in the docstrings and section 7: training labels must end **strictly before** `embargo_start`, a market session `embargo_sessions` before the test start. Intervals come per symbol from the dataset builder, never from a market row count. `purge` also requires `label_start` and raises on an interval that does not start after its decision date, like `check_fold`. Boundary tests: a label ending the session before `embargo_start` is kept; one ending on it, inside the gap, or overlapping the test window is purged; an invalid interval raises. |
+| 5.3 allowlist completeness | Valid | The test compares the full expected factor-column set (all 27 names), not only the count. |
+| 5.4 type errors | Valid | Explicit type checks: every string field, integer field and date field raises `ContractError` on a wrong type. Test with `None` and numbers. |
+| 5.1 / 5.2 FDR registration and the Newey-West test specification | Agreed; not in PR #10 | Recorded as requirements for PR #13 (section 8 below). |
+
+## 8. Requirements carried to later PRs (from the PR #10 review)
+
+- **FDR (PR #13).**
+  - Exactly one primary test per experiment and per configuration, with a stable label.
+  - The run starts, and the test is logged, before its result is read.
+  - Failed or unfavourable runs stay in the run lifecycle (never deleted).
+- **Primary-test specification, before any decision uses it.**
+  - Rank IC per date (Spearman with tie handling, as the decile scan).
+  - The incremental IC is the model IC minus the baseline IC on the same dates and rows.
+  - Newey-West lag = horizon - 1, as `mean_test` elsewhere.
+  - A minimum of 30 stocks per date and 60 valid dates per fold.
+  - Dates with too few stocks are dropped and counted.
+  - The baseline is pinned by `BaselineSpec`.
+- **Dataset builder (PR #11).**
+  - Per-symbol label start and end.
+  - Allowlist and source versions only.
+  - NULL labels excluded by an explicit, counted rule.
+  - The fingerprint includes the data identity (warehouse SHA, feature build).
+
+### PR #10 review fixes: result (2026-11-12)
+
+Done as planned. Full suite: 624 passed (616 before).
+
+- **Deep immutability.**
+  - `ExperimentSpec.params` is frozen at construction: read-only mappings, tuples, and finite scalars or dates
+    only.
+  - `DatasetSpec.features` is copied into a tuple of `FeatureSpec`.
+  - Tests: mutating the caller's dict or list (nested too) changes neither the spec nor its id; the spec's own
+    params raise on assignment.
+- **`BaselineSpec(factor, source_version, field)`.** The factor version is pinned to the current
+  `f1:<factors.version()>`; a stale version is refused. A changed factor definition (simulated by patching
+  `factors.version`) changes the experiment id.
+- **`SplitSpec.first_date`.** The split must cover the dataset period exactly, and `folds` uses only sessions in
+  `[first_date, last_date]`.
+- **Purge contract.** Labels must end strictly before `embargo_start`. `purge` requires the label interval and
+  raises on an invalid one.
+  - Boundary tests: the session before the gap is kept; on `embargo_start`, inside the gap and in the test
+    window are purged.
+  - A row decided before a rolling training window is dropped.
+- **Types.** Explicit type checks: `None`, numbers for strings, `True` or `1.0` for ints, and strings for specs
+  raise `ContractError`.
+- **Allowlist test.** It compares all 27 factor columns and all 6 regime states by name.
+- **Mutation check.** 38 mutations (28 updated, 10 new), all caught. The three immutability mutations are caught
+  by the immutability test on its own. Two first-pass findings got fixes:
+  - the training-window purge had no row decided before a rolling window, so a test was added;
+  - the "bool as int" mutation first disabled every type check instead of only the bool clause, so it was
+    rewritten.
+
+## PR #10 second review (external, 2026-11-12, head `653b2c1`): assessment and plan
+
+Both findings were reproduced:
+- setting `regimes.TERCILE_DIMENSIONS` to another tuple leaves `regimes.version()` unchanged;
+- `check_fold` accepts a fold that starts before the split and ends after `split.last_date` (2023-12-31 against
+  2023-12-29), because both dates are before the research cutoff.
+
+The audit of the other version inputs found the same gap in the factor source version:
+- `factors.version()` hashes the factor SQL and definitions but not the `FactorParams` defaults (scoring
+  universe ADV and sessions, minimum stocks, minimum industry size, winsor level), and all of them change the
+  scores.
+- `factors.version()` is also stored as the `pattern_version` of the recorded interaction run, so changing that
+  function would relabel a stored run whose definitions did not change.
+
+| Point | Action |
+|---|---|
+| `regimes.version()` omits `TERCILE_DIMENSIONS` | Add it to the hashed input. `regimes.version()` is new in this PR, so nothing stored uses it yet. The audit of `regimes.py` finds no other module-level input: `DIMENSIONS`, `TERCILE_DIMENSIONS`, `VALUES_SQL`, the three functions and the `RegimeParams` defaults are all hashed. Tests, each through `monkeypatch`: changing `TERCILE_DIMENSIONS`, `DIMENSIONS`, `VALUES_SQL` or a `RegimeParams` default changes the version. |
+| Factor source version omits `FactorParams` | The ML source version of `stock_factors` becomes `f1:<factors.version()>:<digest of FactorParams()>`. `factors.version()` itself is unchanged, so the stored interaction run keeps its meaning. Test: changing a `FactorParams` default (for example `winsor`) changes the ML source version, so the feature and the baseline are refused until approved again. |
+| `check_fold` does not validate the fold against the split | `check_fold` checks `fold.train_start >= split.first_date` and `fold.test_end <= split.last_date`, and the ordering `train_start < embargo_start <= test_start`, `train_end < test_start <= test_end`. Tests: a fold starting before the split, one ending after `split.last_date` but before the cutoff, and each ordering violation are refused. |
+| CI | Confirmed by the user from the run of the pushed head. |
+
+### PR #10 second review fixes: result (2026-11-12)
+
+Done as planned, with the reviewer's additional conditions. Full suite: 638 passed (624 before).
+
+- **`regimes.version()`.** It now hashes canonical JSON (sorted keys, fixed separators) of:
+  - the values SQL and the source of the percentile, state and build functions (the risk rule lives in
+    `build_regimes`);
+  - `DIMENSIONS` (states and descriptions) and `TERCILE_DIMENSIONS`;
+  - every `RegimeParams` default, via `asdict`.
+
+  `repr()` is no longer used. The audit found no other module-level input in `regimes.py`.
+  - Tests: changing `TERCILE_DIMENSIONS`, `DIMENSIONS`, `VALUES_SQL` or a `RegimeParams` default (two of them)
+    changes the version, each tested independently; reordering `DIMENSIONS` does not.
+- **`allowlist.factor_source_version()`.** It is the single source used by both `FeatureSpec` and
+  `BaselineSpec`: `f1:<factors.version()>:<canonical digest of every FactorParams field>`.
+  - `factors.version()` is unchanged, so the recorded interaction run keeps its meaning.
+  - Test, parametrized over every `FactorParams` field: changing that default changes the ML version, keeps
+    the `f1:<factors.version()>` prefix, and refuses a feature or a baseline built with the old version.
+- **`check_fold` is an independent guard.** It checks the fold itself, not only the rows: all five boundaries
+  must lie in `[split.first_date, split.last_date]`, with `train_start <= train_end < test_start <= test_end`
+  and `train_start < embargo_start <= test_start`.
+  - Tests cover a fold correctly ordered but starting before the split, one ending after `split.last_date` yet
+    before the cutoff, and each ordering and embargo violation.
+  - Every fold that `folds()` produces (expanding, rolling, embargo 0) passes the same check.
+- **Mutation check.** 47 mutations (38 earlier plus 9 new), all caught by an assertion.
+
+## PR #10 third review (external, 2026-11-12, head `116dacc`): assessment and plan
+
+**Verified.**
+- `build(..., factor_params, regime_params)` accepts overrides and forwards them to `build_factors` and
+  `build_regimes`, but `feature_builds` records neither.
+- `quant build` (`cli.py`) always uses the defaults; only tests pass other values. So no production build is
+  known to be non-default, but the database cannot prove it.
+- The ML source versions hash the code defaults, not the parameters that built the database. A build made with
+  other parameters would be accepted under the default version.
+
+**Decision: option A (persist the effective configuration), with option B's strictness for unknown builds.**
+
+1. **`build.py`.** `feature_builds` gets four nullable columns:
+   - `factor_params`: canonical JSON of the `FactorParams` actually used;
+   - `regime_params`: the same for `RegimeParams`;
+   - `factors_version`: `factors.version()` at build time;
+   - `regimes_version`: the regime definition version at build time.
+
+   The insert names its columns. A fresh build writes them. Older history rows are carried over `BY NAME`, so
+   they keep NULL, which means unknown.
+2. **Regime definition version.** `regimes.version()` stops hashing the `RegimeParams` defaults: it becomes the
+   definitions only (SQL, code, `DIMENSIONS`, `TERCILE_DIMENSIONS`), like `factors.version()`. The parameters
+   enter the ML source version separately, as for factors. `regimes.version()` is new in this PR, so nothing
+   stored depends on it.
+3. **ML source versions as a function of definitions plus parameters.**
+   - `allowlist.factor_source_version(params)` = `f1:<factors.version()>:<digest(params)>`.
+   - `allowlist.regime_source_version(params)` = `<regimes.version()>:<digest(params)>`.
+   - Approved means the current definitions with the default parameters. `FeatureSpec` and `BaselineSpec`
+     accept only the approved versions, as now.
+4. **New `ml/builds.py`: `build_source_versions(con, build_id)`.** It reads the stored row and returns the
+   effective version of each approved table:
+   - `stock_features` gets `feature_set_version`;
+   - `stock_factors` and `market_regimes` get their version from the stored definitions and parameters.
+
+   It raises when the row is missing or any of the four columns is NULL (a legacy or unknown build is never
+   treated as default). `check_build(con, build_id, dataset)` refuses a dataset when any feature's approved
+   version differs from the build's effective version. PR #11 calls it before reading any feature.
+5. **`factors.version()` is unchanged.** A test pins that it does not depend on `FactorParams`.
+
+**Tests**, on synthetic builds:
+- the default build records the approved versions, and `check_build` accepts it;
+- a build with a changed `FactorParams` value records different metadata, and `check_build` refuses the
+  factor features and the baseline factor;
+- the same with a changed `RegimeParams` value, refused for the regime features;
+- a legacy row (the four columns NULL) is refused;
+- a rebuild keeps the history rows;
+- `factors.version()` is unchanged by `FactorParams`.
+
+**Consequence for the real store.** The current `research.duckdb` was built before these columns existed, so ML
+refuses it until the next `quant build`, which runs with the defaults and records them. The daily pipeline
+rebuilds it.
+
+### PR #10 third review fixes: result (2026-11-12)
+
+Done as planned. Full suite: 646 passed (638 before).
+
+- **`feature_builds` records the effective configuration.** Four nullable columns: `factor_params` and
+  `regime_params` (canonical JSON of the parameters actually passed to `build()`), `factors_version` and
+  `regimes_version`. The insert names its columns. Older rows are carried over `BY NAME` with NULL.
+- **Definitions are split from parameters.**
+  - `regimes.version()` now hashes the definitions only (SQL, code, `DIMENSIONS`, `TERCILE_DIMENSIONS`), like
+    `factors.version()`, which is unchanged.
+  - The ML source versions are `factor_source_version(params, definitions)` and
+    `regime_source_version(params, definitions)`. Their defaults (current definitions, default parameters) are
+    the approved versions; `FeatureSpec` and `BaselineSpec` use them.
+- **`ml/builds.py`.**
+  - `build_source_versions(con, build_id, schema)` computes each table's effective version from the stored row.
+  - It raises `ContractError` for a missing build, a row with NULL metadata, or a `feature_builds` table without
+    the columns at all.
+  - `check_build(con, build_id, dataset, baseline)` refuses any feature, or the baseline, whose approved version
+    differs from the build's.
+- **Found while checking the real store.** The real `research.duckdb` has the old schema without the new
+  columns. The first version of `build_source_versions` raised a DuckDB `BinderException` there instead of a
+  `ContractError`, so the columns are now checked first, with a test on an old-schema table.
+  - The real build is refused with "feature_builds has no factor_params, ... rebuild with `quant build`", as
+    planned. The next `quant build` records the defaults.
+- **Tests (`test_ml_builds.py`, 8).**
+  - A default build is recorded and accepted.
+  - A build with other `FactorParams` is refused for factor features and for the baseline, while its default
+    regimes are accepted; a build with other `RegimeParams` is refused for regime features.
+  - NULL metadata, the old schema and a missing build are all refused.
+  - A rebuild keeps history rows (legacy NULL).
+  - The schema-attached database works.
+  - `factors.version()` does not depend on `FactorParams`.
+- **Mutation check.** 55 mutations, all caught: 47 earlier, 2 re-anchored, the regime-params mutation retired
+  (parameters left that hash by design), and 9 new.
+  - The old-schema mutation is caught by DuckDB's error, which is exactly the failure the check prevents.
+
+## PR #10 fourth review point (external, 2026-11-12): factor implementation not in the source version
+
+**Verified, and wider than reported.**
+- `factors.version()` hashes `RAW_SQL`, `NORMALIZE_SQL` and `FACTORS`, but not `build_factors()`, which formats
+  the parameters into the SQL and chooses the factor columns.
+- The same class of gap exists elsewhere:
+  - the `stock_features` source version is the constant `v2`, unchanged by an edit of
+    `03_stock_features.sql`;
+  - factors and regimes are computed from `daily_panel` and `stock_features`, so an upstream SQL change alters
+    them while no ML version changes.
+- `ml/builds.py` ignores `feature_builds.code_hash`, which already identifies all of this:
+  `feature_build_hash()` hashes every build SQL file and the whole of `build.py`, `factors.py` (so
+  `build_factors`), `regimes.py` and `backtest/costs.py`. It is non-NULL on every build row.
+
+**Plan.** Bind every ML source version to the feature-build implementation.
+- `source version = <table definition>:<parameter digest>@<feature build code hash>`:
+  - `stock_features`: `v2@<code>`;
+  - `stock_factors`: `f1:<factors.version()>:<FactorParams digest>@<code>`;
+  - `market_regimes`: `<regimes.version()>:<RegimeParams digest>@<code>`.
+- The approved version uses the current `feature_build_hash()`. A build's effective version uses its stored
+  `code_hash`.
+- So any change to the code that produces `research.duckdb` changes the approved versions (and every experiment
+  id). A build made by other code is refused by `check_build` until rebuilt.
+- No new column; `factors.version()` is unchanged.
+- This is deliberately coarse: an edit anywhere in the build, comments included, requires a rebuild before ML
+  accepts the data. That is the safe direction for provenance.
+
+**Tests.**
+- A changed build code hash (patched `feature_build_hash`) changes all three approved versions, and refuses a
+  feature or baseline built under the old one.
+- A build row whose `code_hash` differs from the current code is refused.
+- `factors.py`, the module that defines `build_factors`, and every build SQL file are in
+  `feature_build_files()`.
+- A default build made by the current code is accepted.
+
+### PR #10 fourth review point: result (2026-11-12)
+
+Done as planned. Full suite: 649 passed (646 before).
+
+- **Every ML source version ends with `@<feature build code hash>`.**
+  - Versions: `stock_features` `v2@<code>`; `stock_factors` `f1:<factors.version()>:<FactorParams digest>@<code>`;
+    `market_regimes` `<regimes.version()>:<RegimeParams digest>@<code>`.
+  - Approved versions use the current `feature_build_hash()`; `ml/builds.py` uses the build's stored `code_hash`.
+  - So `build_factors`, every build SQL file (upstream `daily_panel` and `stock_features` included),
+    `regimes.py` and `costs.py` are all bound. `factors.version()` is unchanged, and no column was added.
+- **Tests.**
+  - A changed build code hash changes all three approved versions and leaves the definition and parameter parts
+    as they were.
+  - Features and the baseline approved under the old code are refused.
+  - A build row with another `code_hash` is refused.
+  - `factors.py` (where `build_factors` lives) and every build SQL file are in `feature_build_files()`.
+- **Mutation check.** 60 mutations (55 earlier, four re-anchored, and 5 new), all caught.
+
+### PR #10 fifth review point: result (2026-11-12)
+
+An empty build provenance value is refused, never replaced.
+- `build_source_versions` refuses NULL, non-string, empty and blank values in all six metadata fields
+  (`factor_params`, `regime_params`, `factors_version`, `regimes_version`, `feature_set_version`, `code_hash`).
+- The version helpers substitute the current value only when the argument is omitted (`None`); an explicit
+  empty string raises.
+- Tests:
+  - 12 parametrized cases: each field set to `''` and `'   '`;
+  - explicit empty arguments to the helpers.
+- Both mutations are caught: checking only `None` in builds, and dropping the empty-value check in the helpers.
+  The full suite has 662 passing tests.

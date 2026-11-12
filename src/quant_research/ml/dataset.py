@@ -7,6 +7,7 @@ window as 04_stock_targets.sql: label_start = lead(date, 1), label_end = lead(da
 adj_close(label_end) / adj_open(label_start) - 1 reproduces fwd_ret_exec_{h}d.
 """
 
+import fcntl
 import hashlib
 import json
 import math
@@ -195,66 +196,32 @@ def write_dataset(result: DatasetResult, path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_name(f".{path.name}.lock")
-    _acquire(lock, path)
+    fd = _acquire(lock, path)
     try:
         return _publish(result, path)
     finally:
-        lock.unlink(missing_ok=True)
+        os.close(fd)                                  # releases the flock; the lock file stays
 
 
-def _owner() -> str:
-    return json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "created": time.time(),
-                       "token": uuid.uuid4().hex})
-
-
-def _alive(pid: int) -> bool:
+def _acquire(lock: Path, path: Path) -> int:
+    """One publisher per path, with an OS advisory lock (fcntl.flock, exclusive, non-blocking) on a lock file that
+    is never deleted. The kernel releases the lock when its holder exits, crashes or is killed, so there is no stale
+    lock to recover and no PID bookkeeping. The file is never unlinked: deleting a flock file while another process
+    holds it open would let two publishers lock different inodes. Returns the open descriptor; closing it unlocks.
+    POSIX only (macOS, Linux)."""
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:                           # exists, owned by another user
-        return True
-    return True
-
-
-def _acquire(lock: Path, path: Path) -> None:
-    """One publisher per path. The lock file (created with O_EXCL, atomic across processes) records its owner's pid,
-    host, creation time and a token. A lock left by a crashed publisher (same host, pid no longer running) is
-    recovered: it is renamed away and its content re-checked, so a live lock taken meanwhile is never removed. A
-    lock is never removed because of its age. Manual recovery, when the owner cannot be checked (another host, an
-    unreadable lock): make sure no publisher runs, then delete the .lock file."""
-    for _ in range(2):
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(fd, "w") as f:
-                f.write(_owner())
-            return
-        try:
-            text = lock.read_text()
-            owner = json.loads(text)
-            stale = owner["host"] == socket.gethostname() and not _alive(int(owner["pid"]))
-        except (OSError, ValueError, KeyError, TypeError):
-            text, stale = None, False
-        if not stale:
-            raise FileExistsError(f"{path} is being published by another process (lock {lock}); if no publisher "
-                                  "is running, delete the lock file")
-        moved = lock.with_name(f"{lock.name}.stale-{uuid.uuid4().hex}")
-        try:
-            os.rename(lock, moved)
-        except FileNotFoundError:
-            continue                                  # another publisher recovered it first
-        if moved.read_text() != text:                 # a live lock was taken in between: give it back, refuse
-            try:
-                os.link(moved, lock)
-            except FileExistsError:
-                pass
-            moved.unlink(missing_ok=True)
-            raise FileExistsError(f"{path} is being published by another process (lock {lock})")
-        moved.unlink(missing_ok=True)
-    raise FileExistsError(f"{path}: could not acquire the publish lock {lock}")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise FileExistsError(f"{path} is being published by another process (lock {lock})") from None
+    try:                                              # diagnostics only: who holds it; nothing reads it
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "since": time.time()}).encode())
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _publish(result: DatasetResult, path: Path) -> Path:

@@ -335,10 +335,9 @@ def test_concurrent_publishers_never_overwrite(research, tmp_path):
         t.join()
     assert sorted(results) == ["ok", "refused", "refused", "refused"]
     assert dataset.read_dataset(target)[1]["fingerprint"] == r.fingerprint
-    assert not list(tmp_path.glob(".shared.*"))                            # no lock or temp left
-    (tmp_path / ".other.lock").write_text("")                              # unreadable: never removed
-    with pytest.raises(FileExistsError, match="being published"):
-        dataset.write_dataset(r, tmp_path / "other")
+    assert [p.name for p in tmp_path.glob(".shared.*")] == [".shared.lock"]  # no temp left; the lock file stays
+    (tmp_path / ".other.lock").write_text("garbage")                       # a lock file nobody holds: no obstacle
+    dataset.write_dataset(r, tmp_path / "other")
     assert (tmp_path / ".other.lock").exists()
 
 
@@ -374,22 +373,48 @@ def test_each_crossing_rule_works_on_its_own():
     assert dataset._status(df, spec).tolist() == ["label_crosses_period", "label_crosses_period", "kept"]
 
 
-def test_a_lock_left_by_a_crashed_publisher_is_recovered_but_a_live_one_is_not(research, tmp_path):
-    import json
-    import socket
+HOLD = ("import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(60)\n")
+
+
+def test_a_live_lock_is_never_removed_and_a_killed_holder_frees_it(research, tmp_path):
+    """The publish lock is an OS advisory lock: another process holding it refuses the publish without touching
+    the lock file; when the holder is killed (SIGKILL, no cleanup) the kernel releases it and publishing works."""
+    import fcntl
     with _con(research) as con:
         r = dataset.build_dataset(con, _spec(), _build_id(con))
-    dead = subprocess.Popen([sys.executable, "-c", "pass"])
-    dead.wait()                                                          # its pid no longer runs
     lock = tmp_path / ".ds.lock"
-    owner = {"host": socket.gethostname(), "created": 0, "token": "x"}
-    lock.write_text(json.dumps(owner | {"pid": dead.pid}))
-    dataset.write_dataset(r, tmp_path / "ds")                            # stale: recovered
-    assert (tmp_path / "ds").exists() and not lock.exists() and not list(tmp_path.glob(".ds.lock.stale-*"))
-    for live in (owner | {"pid": os.getpid()}, owner | {"pid": dead.pid, "host": "another-host"}):
-        lock2 = tmp_path / ".ds2.lock"
-        lock2.write_text(json.dumps(live))                               # alive, or not checkable: kept
-        with pytest.raises(FileExistsError, match="delete the lock file"):
-            dataset.write_dataset(r, tmp_path / "ds2")
-        assert json.loads(lock2.read_text()) == live
-        lock2.unlink()
+    holder = subprocess.Popen([sys.executable, "-c", HOLD, str(lock)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        inode = lock.stat().st_ino
+        for _ in range(3):
+            with pytest.raises(FileExistsError, match="being published by another process"):
+                dataset.write_dataset(r, tmp_path / "ds")
+        assert lock.stat().st_ino == inode and not (tmp_path / "ds").exists()   # same file, never replaced
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):                            # the holder still holds it
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    finally:
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+    dataset.write_dataset(r, tmp_path / "ds")                               # released by the kernel
+    assert dataset.read_dataset(tmp_path / "ds")[1]["fingerprint"] == r.fingerprint
+    assert lock.stat().st_ino == inode                                     # the lock file is never deleted
+
+
+def test_the_lock_is_released_after_a_failed_publish(research, tmp_path, monkeypatch):
+    with _con(research) as con:
+        r = dataset.build_dataset(con, _spec(), _build_id(con))
+    monkeypatch.setattr(dataset, "_publish", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        dataset.write_dataset(r, tmp_path / "ds")
+    monkeypatch.undo()
+    dataset.write_dataset(r, tmp_path / "ds")                               # not left locked

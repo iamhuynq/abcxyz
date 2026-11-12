@@ -767,3 +767,37 @@ Full suite: 688 passed (687 before).
 - **Mutation check.** 24 mutations, all caught (20 earlier plus 4 new): NaT not null, stale lock never
   recovered, live lock treated as stale, other host trusted.
 - CI is confirmed by the user on the pushed head.
+
+### PR #11 third review: result (2026-11-12)
+
+Full suite: 689 passed (688 before).
+
+- **P2: race in stale-lock recovery (confirmed).**
+  - `os.rename(lock, moved)` does not guarantee that the file renamed is the one just read. If publisher B reads a
+    stale lock, publisher A recovers it first and takes a new live lock, B then renames A's live lock, fails to
+    restore it because C has taken the path, and deletes it while A is still publishing.
+  - This cannot be closed with PID files and renames, so the recovery code is removed.
+- **Fix: an OS advisory lock.**
+  - `write_dataset` opens `.{name}.lock` (created if missing) and takes `fcntl.flock(LOCK_EX | LOCK_NB)`.
+  - It holds the lock for the whole publish and closes the descriptor in `finally`, which releases the lock.
+  - The kernel releases the lock when its holder exits, crashes or is killed, so there is no stale lock, no PID
+    or host bookkeeping, and no manual recovery.
+  - The lock file is never deleted. Deleting a flock file while another process holds it open would let two
+    publishers lock different inodes. The leftover empty `.lock` file is harmless.
+  - The file records `{pid, host, since}` for diagnostics only; nothing reads it.
+  - `flock` locks per open file description, so threads of one process also exclude each other (macOS and Linux).
+    POSIX only; the project runs on macOS.
+- **Tests.**
+  - 4 concurrent threads: exactly 1 publishes and 3 are refused. The lock file stays and no temporary directory
+    is left. A leftover lock file that nobody holds does not block a publish.
+  - A subprocess holds the lock:
+    - publishing is refused 3 times;
+    - the lock file keeps the same inode and the holder still holds it (a non-blocking flock from the test fails),
+      so a live lock is never removed;
+    - after SIGKILL (no cleanup), the kernel frees the lock and publishing succeeds; the lock file inode is
+      unchanged.
+  - A publish that raises still releases the lock: the next publish succeeds.
+- **Mutation check.** 25 mutations, all caught:
+  - 20 earlier dataset mutations; the 4 PID-recovery mutations no longer apply and are retired;
+  - 5 new: no flock, shared instead of exclusive lock, lock file unlinked after publish, descriptor never
+    closed, lock file replaced on acquire.

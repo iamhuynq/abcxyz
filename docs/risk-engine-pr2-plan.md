@@ -133,3 +133,70 @@ This document contains:
 - The dashboard reads stored rows only; the UI tests cover complete, INCOMPLETE, empty and failed runs.
 - Full suite green, CI synthetic; new tests mutation-checked.
 - README, STATUS and this plan updated with the results.
+
+## Result (2026-11-12)
+
+Branch `risk-engine-pr2`. All decisions D1 to D9 were applied as approved. Full suite: 556 passed (534
+before). CI stays synthetic: it checks code and fixtures, not the production store. The real-store results
+below were run locally.
+
+### Code
+
+- `risk/stress.py`:
+  - frozen scenario set `stress/v1`;
+  - market (beta-adjusted, INCOMPLETE without a beta; uniform, labelled), industry and cluster (one group at a
+    time; unlabelled holdings make the family INCOMPLETE), liquidity (ADV x 0.5 through `liquidity.position`),
+    suspension (top 3, ties by symbol; 20 and 61 sessions);
+  - results are MEASURED or INCOMPLETE only and never summed; untrusted positions make every scenario
+    INCOMPLETE.
+- `risk/store.py`:
+  - all persistence, moved out of `evaluate.py`;
+  - new tables `risk_scenarios` (frozen), `risk_stress_results` (with a `seq` column for the declared order)
+    and `risk_reconciliation`.
+- `evaluate.evaluate`: risk model `risk-v2`. Stress runs on the same assessed positions in the same run
+  (`--no-stress` skips it). Re-simulation parameters and reconciliation rows are stored before the run is
+  marked ok. A duplicate run id gives a clear error.
+- `portfolio/evaluate.py`: `prepare` and `simulate`, shared by the grid and the Risk Engine; the grid's
+  behaviour is unchanged (its tests pass).
+- `risk/construction.py`:
+  - re-simulates the configuration that the latest valid run stored (its version must match, or it is
+    refused), under that run's stored universe, with both valuation curves;
+  - builds positions from the trades at the engine's marks;
+  - reconciles every stored strategy metric of the decision setting with a relative tolerance of 1e-9.
+- CLI: `quant risk evaluate --construction C1..C6 [--date D]`, `--no-stress`. The report has new sections:
+  "Re-simulation" and "Stress scenarios".
+- UI:
+  - a read-only "Risk" page: stored runs only, including failed ones; status, versions, limits, stress,
+    positions, metrics, re-simulation;
+  - a "Risk: evaluate paper portfolio" task on Run tasks.
+
+### Tests and mutation check
+
+New test files: `test_risk_stress.py` (13, hand-computed), `test_risk_construction.py` (7), and Risk page tests
+(3) in `tests/ui/test_pages.py`.
+
+Mutation check: 22 mutations for this PR, all caught; the 34 PR 1 mutations, rerun, are all caught.
+- Two mutations first survived, and each got a test: the industry family using cluster labels, and the code
+  constant `CONFIGS` used instead of the stored configuration.
+- One mutation ("stored config ignored") is stopped by the version check in the code before any assertion
+  runs. These are two independent defences, both tested.
+
+### Real store
+
+Backup `data/results.before-risk-pr2.duckdb`. After the runs, `portfolio_results` is identical. The only
+changes are 3 new tables, 8 `risk` runs and their rows; there are no hypothesis rows.
+
+- **Paper at 2026-11-09:** INCOMPLETE (cluster coverage; beta for CAR). Stress:
+  - market uniform -5% / -10% / -15% of NAV; the beta-adjusted variant is INCOMPLETE (no beta for CAR);
+  - worst industry (3510) -2.0% / -4.0%;
+  - worst cluster (16) -2.9% / -5.9%, INCOMPLETE with 36.2% unclustered;
+  - ADV halved: liquidation cost 10.7 -> 12.1 m VND, maximum horizon 0.55 -> 1.09 sessions, illiquid weight
+    0% -> 14.6%;
+  - suspension of the top 3: 17.3% of NAV blocked for 20 sessions, 17.3% lost at 61.
+- **Backtest h10 k20 renew:** as in PR 1, plus stress.
+- **Construction C1 to C6 (re-simulations at 2023-12-29):** all INCOMPLETE; none reconciles with its stored
+  run.
+  - C1 and C4: equity metrics are identical; only the counters and participation differ (C1: 6 metrics;
+    C4: 4).
+  - C2, C3, C5 and C6: most metrics differ, as the Phase 0 audit found.
+  - Each report says so in its "Re-simulation" section.

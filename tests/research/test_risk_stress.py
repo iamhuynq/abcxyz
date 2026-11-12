@@ -2,6 +2,7 @@
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -45,7 +46,7 @@ def test_negative_beta_is_a_gain_and_missing_beta_is_incomplete():
     assert _by(stress.market(only_c, NAV, (-0.10,)), "market_beta_-10%").valuation_loss == pytest.approx(-1e7)
     res = stress.market(_pos(beta=[1.5, None, -0.5]), NAV, (-0.05,))
     b = _by(res, "market_beta_-5%")
-    assert b.status == INCOMPLETE and b.valuation_loss is None and b.affected == ("B",) and "no beta for B" in b.reason
+    assert b.status == INCOMPLETE and b.valuation_loss is None and b.affected == ("B",) and "no finite beta for B" in b.reason
     assert _by(res, "market_uniform_-5%").status == MEASURED
 
 
@@ -82,8 +83,8 @@ def test_liquidity_shock_halves_adv_through_the_cost_model():
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
 def test_invalid_adv_makes_the_liquidity_shock_incomplete(bad):
     p = _pos()
-    p.loc[1, "adv"] = None if bad != bad else bad
-    p["adv"] = p["adv"].map(liquidity.valid_adv)                # as the assessment stores it: valid ADV or None
+    p["adv"] = p["adv"].astype(float)
+    p.loc[1, "adv"] = bad                                       # raw, not normalized upstream
     r = stress.liquidity_shock(p, NAV, 0.5, liquidity.LiquidityParams())
     assert r.status == INCOMPLETE and r.cost is None and r.affected == ("B",)
 
@@ -95,6 +96,7 @@ def test_suspension_picks_the_largest_with_a_symbol_tie_break_and_writes_down_on
     assert short.affected == long_.affected == ("A", "B")
     assert short.valuation_loss == 0.0 and short.coverage == pytest.approx(0.6) and "exit blocked" in short.notes
     assert long_.valuation_loss == pytest.approx(6e8) and "valued at 0" in long_.notes
+    assert "assumed write-down under prolonged suspension" in long_.notes and "not an expected loss" in long_.notes
     assert stress.suspension(p, NAV, 2, (60,))[0].valuation_loss == 0.0          # the write-down starts after 60
 
 
@@ -119,3 +121,20 @@ def test_scenario_set_is_declared_and_serializable():
     s = stress.STRESS_V1
     assert s.key == "stress/v1" and s.market_shocks == (-0.05, -0.10, -0.15) and s.suspension_sessions == (20, 61)
     assert '"adv_factor": 0.5' in s.to_json()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_beta_is_unavailable_not_measured(bad):
+    r = _by(stress.market(_pos(beta=[1.5, bad, -0.5]), NAV, (-0.10,)), "market_beta_-10%")
+    assert r.status == INCOMPLETE and r.valuation_loss is None and r.affected == ("B",)
+    assert "no finite beta for B" in r.reason and r.coverage == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_position_value_makes_every_scenario_incomplete(bad):
+    p = _pos()
+    p.loc[2, "value"] = bad
+    res = stress.run(p, NAV, [])
+    assert res and all(r.status == INCOMPLETE for r in res)
+    assert all("non-finite position value or weight: C" in r.reason for r in res)
+    assert all(r.valuation_loss is None or np.isfinite(r.valuation_loss) for r in res)

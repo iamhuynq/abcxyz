@@ -61,7 +61,7 @@ def run(args: argparse.Namespace, store_factory: Callable[[], ResultsStore],
                 print(f"Refused: {exc}", file=sys.stderr)
                 return 1
             extra = {"source_run": src.run_id, "config_version": src.version, "method": construction.METHOD,
-                     "reconciles": all(r[-1] for r in rec)}
+                     "reconciles": construction.reconciles(rec)}
             missing = ""
         else:
             on = date.fromisoformat(args.date) if args.date else None

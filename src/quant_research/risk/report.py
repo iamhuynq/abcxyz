@@ -95,7 +95,8 @@ def _has(con, table: str) -> bool:
 
 STRESS_NOTE = ("Scenarios are illustrations, not forecasts, probabilities or policy limits: each is MEASURED or "
                "INCOMPLETE, none is summed with another, and idiosyncratic return is 0. A loss is VND lost by marking "
-               "positions down (negative: a gain); the liquidation cost is separate.")
+               "positions down (negative: a gain); the liquidation cost is separate. The 61-session suspension is an assumed "
+               "write-down under prolonged suspension (the valuation rule), not an expected loss or a forecast.")
 
 
 def _stress(con, run_id: str) -> list[str]:
@@ -120,17 +121,23 @@ def _stress(con, run_id: str) -> list[str]:
 def _reconciliation(con, run_id: str) -> list[str]:
     if not _has(con, "risk_reconciliation"):
         return []
-    rows = con.execute("""SELECT source_run, metric, stored, resimulated, rel_diff, within FROM risk_reconciliation
-                          WHERE run_id = ? ORDER BY metric""", [run_id]).fetchall()
+    rows = con.execute("""SELECT source_run, metric, stored, resimulated, rel_diff, within, note
+                          FROM risk_reconciliation WHERE run_id = ?
+                          ORDER BY CASE WHEN within IS NULL THEN 1 ELSE 0 END, metric""", [run_id]).fetchall()
     if not rows:
         return []
-    bad = [r[1] for r in rows if not r[5]]
-    head = ("reconciles with" if not bad else f"does NOT reconcile ({len(bad)} of {len(rows)} metrics) with")
+    from quant_research.risk.construction import REQUIRED
+    compared = [r for r in rows if r[5] is not None]
+    bad = [r[1] for r in compared if not r[5]]
+    complete = {r[1] for r in compared} >= set(REQUIRED)
+    head = ("reconciles with" if complete and not bad else
+            f"does NOT reconcile ({len(bad)} of {len(compared)} compared metrics differ or are missing) with")
     out = ["", "## Re-simulation", "",
            f"This portfolio is a re-simulation of the declared configuration with today's code and data. It {head} "
            f"the stored run `{rows[0][0]}` (relative tolerance 1e-9, the reproducibility policy H-1). It is not the "
            "historical run; the limits and scenarios describe the re-simulation.", "",
-           "| metric | stored | re-simulated | relative difference | within |", "|---|---|---|---|---|"]
-    out += [f"| {m} | {_v(a)} | {_v(b)} | {'-' if d is None else f'{d:.2e}'} | {'yes' if w else 'NO'} |"
-            for _src, m, a, b, d, w in rows]
+           "| metric | stored | re-simulated | relative difference | within | note |", "|---|---|---|---|---|---|"]
+    out += [f"| {m} | {_v(a)} | {_v(b)} | {'-' if d is None else f'{d:.2e}'} | "
+            f"{'not compared' if w is None else 'yes' if w else 'NO'} | {note or ''} |"
+            for _src, m, a, b, d, w, note in rows]
     return out

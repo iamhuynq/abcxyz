@@ -200,3 +200,52 @@ changes are 3 new tables, 8 `risk` runs and their rows; there are no hypothesis 
     C4: 4).
   - C2, C3, C5 and C6: most metrics differ, as the Phase 0 audit found.
   - Each report says so in its "Re-simulation" section.
+
+## PR #9 review (external, 2026-11-12, head `700efb8`): assessment and plan
+
+| Point | Verified | Assessment | Action |
+|---|---|---|---|
+| P1 the construction snapshot values positions apart from the engine's marks | Yes. The engine's mark is `last_price`: it is set to the buy price when the column has no mark yet, and updated at a traded close only while the position is held (`run_targets`, `_trade`). `_positions()` instead looks up the last traded close itself. The two differ when a buy session's close is not valid. Real runs: reconciliation gap 0.0, so no stored result is affected. | Valid. The valuation rule must not be duplicated. | `run_targets(..., snapshot_at=i)` records the engine's own state at the close of session i (shares, marks, cash, equity) in `PortfolioResult.state`. It is optional, and the grid's numbers are unchanged. `construction` uses that state. Regression test: a bought position whose close is not valid by the snapshot date is valued at the engine's buy-price mark, and positions + cash equal the engine's equity. |
+| P1 reconciliation compares only the intersection of metrics | Yes. On C1, 5 of the 30 stored metrics were skipped silently: `break_even_extra_cost_per_side`, the three `excess_cagr_vs_*`, and `rank_persistence`. | Valid | Declared metric sets. **Required:** every strategy-simulation metric, plus `rank_persistence` and the three `excess_cagr_vs_*` (the benchmarks are recomputed with the grid's own functions). **Declared not recomputed:** `break_even_extra_cost_per_side` (a 16-simulation search), listed in the report with that reason. A required metric missing on either side, an empty comparison, or a NULL is not a match. The only exception is `participation_*`, where NULL on both sides means "no order with a valid ADV", and that is stated. A stored metric outside both sets is listed as "not compared". "Reconciles" requires every required metric compared and within tolerance. A nullable `note` column is added to `risk_reconciliation` (additive `ALTER ... IF NOT EXISTS`). |
+| P1 stress accepts non-finite inputs | Yes. A beta of +/-inf is not NaN, so it passes `isna()`. The liquidity shock relies on upstream normalization. | Valid | Validation at the stress boundary with `np.isfinite`: a non-finite or missing beta makes the beta-adjusted scenario INCOMPLETE. ADV is validated locally with `liquidity.valid_adv`. A non-finite position value or weight, or NAV, makes every scenario INCOMPLETE. Direct tests with NaN, +inf and -inf, without upstream normalization. |
+| P2 suspension wording | Partly. The note says "valued at 0 (write-down after 60)". | Valid | Wording "assumed write-down under prolonged suspension (valuation rule), not an expected loss or a forecast" in the note, the report text and the UI caption. |
+| P2 open-price fallback test | Same as P1 | - | The regression test above. |
+| P2 liquidity input contract | Same as P1 | - | Local validation (above). |
+
+Mutation check of each new test (`PYTHONDONTWRITEBYTECODE=1`). The real construction runs are re-run.
+
+### PR #9 review fixes: result (2026-11-12)
+
+Full suite: 565 passed (556 before).
+
+- **Engine state.** `run_targets(..., snapshot_at=i)` keeps the engine's own state at that close in
+  `PortfolioResult.state`: shares, marks, last trade, cash, equity. The construction snapshot reads it, so no
+  valuation rule is re-derived. Default `None`: the grid's numbers are unchanged (backtest and portfolio tests
+  pass, `portfolio_results` identical).
+  - Regression test: a bought position with no valid close up to the snapshot is valued at the engine's
+    buy-price mark, and positions + cash equal the engine's equity.
+- **Reconciliation contract.**
+  - Required: the 25 simulation metrics, plus `rank_persistence` and the three `excess_cagr_vs_*`, recomputed
+    with the grid's own functions.
+  - Declared not recomputed: `break_even_extra_cost_per_side`, with its reason.
+  - A missing required metric, NULL (except `participation_*` NULL on both sides, as declared) or an empty
+    comparison is not a match. Any other stored metric is listed as not compared.
+  - "Reconciles" requires all 29 required metrics compared and within 1e-9.
+  - `risk_reconciliation.note` was added (`ALTER ... ADD COLUMN IF NOT EXISTS`).
+  - Found while fixing: the comparison returned `numpy.bool_`, which an identity check (`is True`) rejects;
+    values are now cast to Python types.
+- **Stress boundary.**
+  - A beta that is NaN or +/-inf makes the beta-adjusted scenario INCOMPLETE.
+  - ADV is validated in the liquidity shock itself, through `liquidity.valid_adv`.
+  - A non-finite position value or weight makes every scenario INCOMPLETE.
+  - Direct tests with NaN, +inf and -inf, without upstream normalization.
+- **Wording.** The 61-session suspension is described as an "assumed write-down under prolonged suspension ...
+  not an expected loss or a forecast" in the note, the report and the UI.
+- **Mutation check.** 30 mutations for PR 2 (22 updated plus 9 new; two re-anchored), all caught; the 34 PR 1
+  mutations are all caught. Two are caught by an error rather than an assertion, and in both cases the code
+  never yields a false measurement:
+  - removing the local ADV check makes the liquidity model return no cost, so the sum raises;
+  - the "stored config ignored" mutation is stopped by the version check.
+- **Real store, construction re-runs.** All six still do not reconcile. With the full required set, C1 matches
+  23 of 29 and C4 matches 24 of 29; C4's `rank_persistence` also differs. C2, C3, C5 and C6 differ on 20 to 22
+  metrics. The NAV reconciliation gap is 0.0 everywhere, and `portfolio_results` is identical to the backup.

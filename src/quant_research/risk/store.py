@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS risk_stress_results (
 CREATE TABLE IF NOT EXISTS risk_reconciliation (
     run_id VARCHAR NOT NULL, source_run VARCHAR NOT NULL, metric VARCHAR NOT NULL, stored DOUBLE,
     resimulated DOUBLE, rel_diff DOUBLE, within BOOLEAN, PRIMARY KEY (run_id, metric));
+-- Added 2026-11-12 (PR #9 review): why a metric is missing, NULL-equivalent or not compared (within NULL).
+ALTER TABLE risk_reconciliation ADD COLUMN IF NOT EXISTS note VARCHAR;
 """
 
 
@@ -93,6 +95,8 @@ def save_stress(store: ResultsStore, run_id: str, results: list[StressResult]) -
 
 
 def save_reconciliation(store: ResultsStore, run_id: str, source_run: str, rows: list[tuple]) -> None:
-    """rows: (metric, stored, resimulated, rel_diff, within)."""
-    store.con.executemany("INSERT INTO risk_reconciliation VALUES (?, ?, ?, ?, ?, ?, ?)",
-                          [(run_id, source_run, m, _f(a), _f(b), _f(d), bool(w)) for m, a, b, d, w in rows])
+    """rows: (metric, stored, resimulated, rel_diff, within, note); within None = not compared."""
+    store.con.executemany("""INSERT INTO risk_reconciliation (run_id, source_run, metric, stored, resimulated, rel_diff,
+                                                             within, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                          [(run_id, source_run, m, _f(a), _f(b), _f(d), None if w is None else bool(w), note)
+                           for m, a, b, d, w, note in rows])

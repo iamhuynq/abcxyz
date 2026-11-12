@@ -118,10 +118,12 @@ def prepare(store: ResultsStore, cfg: Config, period: str = "research",
 
 
 def simulate(p: Prepared, cfg: Config, capital: float = DECISION[0], costs: CostModel | None = COSTS[DECISION[1]],
-             sell_lag: int = SELL_LAG, writedown_after: int | None = None) -> PortfolioResult:
-    """One simulation of a configuration (pure: nothing is stored)."""
+             sell_lag: int = SELL_LAG, writedown_after: int | None = None,
+             snapshot_at: int | None = None) -> PortfolioResult:
+    """One simulation of a configuration (pure: nothing is stored). `snapshot_at`: also keep the engine's state at
+    the close of that session (`PortfolioResult.state`)."""
     return run_targets(p.market, cfg.construction, lambda i: p.scores[i], cfg.schedule, capital, p.industry, p.cash_on,
-                       costs, sell_lag, writedown_after)
+                       costs, sell_lag, writedown_after, snapshot_at)
 
 
 def already_run(store: ResultsStore, name: str, period: str) -> str | None:

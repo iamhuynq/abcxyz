@@ -48,7 +48,8 @@ elif context.freshness(listing, "Risk runs"):
                 else:
                     st.caption("Illustrations, not forecasts or policy limits: each scenario is MEASURED or "
                                "INCOMPLETE and none is summed with another. Valuation loss and liquidation cost are "
-                               "separate; idiosyncratic return is 0.")
+                               "separate; idiosyncratic return is 0. The 61-session suspension is an assumed "
+                               "write-down under prolonged suspension, not an expected loss or a forecast.")
                     st.dataframe(r["stress"].drop(columns=["seq"]), hide_index=True, width="stretch",
                                  column_config={"valuation_loss_pct": PCT, "coverage": PCT})
             with tabs[2]:
@@ -66,7 +67,9 @@ elif context.freshness(listing, "Risk runs"):
                 if rec.empty:
                     st.info("Not a re-simulated portfolio.")
                 else:
-                    ok = bool(rec["within"].all())
+                    compared = rec[rec["within"].notna()]
+                    ok = bool(len(compared)) and bool(compared["within"].astype(bool).all()) and \
+                        not rec["note"].fillna("").str.startswith("missing").any()
                     (st.success if ok else st.warning)(
                         f"Re-simulation of a construction configuration with today's code and data; "
                         f"{'it reconciles with' if ok else 'it does NOT reconcile with'} the stored run "

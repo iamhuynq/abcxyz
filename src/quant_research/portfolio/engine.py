@@ -55,6 +55,10 @@ class PortfolioResult:
     industry_cap_breach_sessions: int = 0           # closes with an actual industry weight above the cap
     industry_cap_breach_after_trades: int = 0       # of which: the close of a trading session
     trades: list[tuple] = field(default_factory=list)     # (session, column, shares (+ buy / - sell), price, cost)
+    # The engine's own state at the close of session `snapshot_at` (run_targets), when asked: shares, marks (the
+    # valuation the equity uses), last traded session, cash and equity. The Risk Engine reads it instead of
+    # re-deriving the marks.
+    state: dict | None = None
 
 
 def rebalance_days(dates: np.ndarray, schedule: str) -> np.ndarray:
@@ -70,7 +74,8 @@ def rebalance_days(dates: np.ndarray, schedule: str) -> np.ndarray:
 
 def run_targets(market: Market, c: Construction, scores: Scores, schedule: str, initial: float,
                 industry: np.ndarray, cash_on: np.ndarray | None = None, costs: CostModel | None = None,
-                sell_lag: int = 3, writedown_after: int | None = None) -> PortfolioResult:
+                sell_lag: int = 3, writedown_after: int | None = None,
+                snapshot_at: int | None = None) -> PortfolioResult:
     """industry: (dates x symbols) object keys; cash_on: bool per date, True = hold cash after that close.
     writedown_after: value a position at 0 while it has not traded for more than this many sessions (valuation
     sensitivity for stocks that stop trading; the position can still be sold if it trades again)."""
@@ -115,6 +120,9 @@ def run_targets(market: Market, c: Construction, scores: Scores, schedule: str, 
             res.stale_value_share_max = max(res.stale_value_share_max, stale)
             stale_sum, held_sessions = stale_sum + stale, held_sessions + 1
         res.equity[i], res.cash[i], res.n_names[i] = cash + held_value, cash, int((shares > 0).sum())
+        if i == snapshot_at:
+            res.state = {"session": i, "shares": shares.copy(), "marks": np.array(marks, dtype=float),
+                         "last_trade": last_trade.copy(), "cash": float(cash), "equity": float(res.equity[i])}
         actual = _max_industry(shares * last_price, industry[i], res.equity[i])
         res.max_actual_industry_weight = max(res.max_actual_industry_weight, actual)
         if actual > c.max_industry_weight + 1e-9:

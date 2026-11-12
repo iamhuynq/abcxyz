@@ -14,6 +14,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 
+import numpy as np
 import pandas as pd
 
 from quant_research.backtest.costs import CostModel
@@ -76,19 +77,27 @@ def _pct(x: float) -> str:
 
 
 def _missing(pos: pd.DataFrame, col: str) -> tuple[str, ...]:
+    """Symbols whose label is missing (industry, cluster)."""
     return tuple(sorted(pos.loc[pos[col].isna(), "symbol"]))
+
+
+def _not_finite(pos: pd.DataFrame, col: str) -> pd.Series:
+    """True where a numeric input is missing, NaN or +/-inf (checked here, at the stress boundary)."""
+    v = pd.to_numeric(pos[col], errors="coerce").astype(float)
+    return ~np.isfinite(v)
 
 
 def market(pos: pd.DataFrame, nav: float, shocks: tuple[float, ...]) -> list[StressResult]:
     """Beta-adjusted (sum of value x beta x shock; INCOMPLETE if any beta is missing) and uniform (every position
     moves by the shock; not beta-adjusted)."""
-    out, lacking = [], _missing(pos, "beta")
+    bad = _not_finite(pos, "beta")
+    out, lacking = [], tuple(sorted(pos.loc[bad, "symbol"]))
     invested = float(pos["value"].sum())
     for s in shocks:
         if lacking:
             out.append(StressResult(f"market_beta_{_pct(s)}", "market", "", INCOMPLETE, nav, None, None, None,
-                                    float(pos.loc[pos["beta"].notna(), "weight"].sum()), lacking,
-                                    f"no beta for {', '.join(lacking)}"))
+                                    float(pos.loc[~bad, "weight"].sum()), lacking,
+                                    f"no finite beta for {', '.join(lacking)}"))
         else:
             loss = -float((pos["value"] * pos["beta"]).sum()) * s
             out.append(StressResult(f"market_beta_{_pct(s)}", "market", "", MEASURED, nav, loss, None, None,
@@ -121,12 +130,15 @@ def liquidity_shock(pos: pd.DataFrame, nav: float, factor: float, params: liquid
                     model: CostModel = CostModel()) -> StressResult:
     """ADV x factor, through the same liquidity model as the limits (cost model v1, fee and tax)."""
     sid = f"liquidity_adv_x{factor:g}"
-    lacking = _missing(pos, "adv")
-    before = float(pos["liquidation_cost"].sum()) if not lacking else None
+    adv = pos["adv"].map(liquidity.valid_adv)                 # validated here, whatever the caller normalized
+    bad = adv.isna()
+    lacking = tuple(sorted(pos.loc[bad, "symbol"]))
     if lacking:
         return StressResult(sid, "liquidity", "", INCOMPLETE, nav, 0.0, None, None,
-                            float(pos.loc[pos["adv"].notna(), "weight"].sum()), lacking,
+                            float(pos.loc[~bad, "weight"].sum()), lacking,
                             f"ADV20 missing or invalid for {', '.join(lacking)}")
+    before = float(pos["liquidation_cost"].sum())
+    pos = pos.assign(adv=adv)
     rows = [liquidity.position(r.symbol, r.value, r.adv * factor, None if pd.isna(r.half_spread) else r.half_spread,
                                None if pd.isna(r.sigma) else r.sigma, 0, False, params, model)
             for r in pos.itertuples()]
@@ -150,7 +162,9 @@ def suspension(pos: pd.DataFrame, nav: float, top: int, sessions: tuple[int, ...
     for n in sessions:
         written = n > WRITEDOWN_SESSIONS
         loss = float(chosen["value"].sum()) if written else 0.0
-        note = (f"no trade for {n} sessions: valued at 0 (write-down after {WRITEDOWN_SESSIONS})" if written else
+        note = (f"assumed write-down under prolonged suspension: no trade for {n} sessions, so valued at 0 by the "
+                f"valuation rule (write-down after {WRITEDOWN_SESSIONS}); an assumption, not an expected loss or a "
+                "forecast" if written else
                 f"exit blocked for {n} sessions ({blocked:.1%} of NAV cannot be sold); still valued at the mark, "
                 f"since the write-down starts after {WRITEDOWN_SESSIONS}")
         out.append(StressResult(f"suspension_top{top}_{n}s", "suspension", "", MEASURED, nav, loss, None, None,
@@ -163,6 +177,10 @@ def run(pos: pd.DataFrame, nav: float, issues: list[str], scen: ScenarioSet = ST
     if not (nav and math.isfinite(nav) and nav > 0):
         return [StressResult("all", "all", "", INCOMPLETE, nav, None, None, None, None, (),
                              "NAV missing or not positive")]
+    bad = _not_finite(pos, "value") | _not_finite(pos, "weight")
+    if bad.any():           # a scenario on a position without a finite value would be a false measurement
+        issues = [*issues, f"non-finite position value or weight: {', '.join(sorted(pos.loc[bad, 'symbol']))}"]
+        pos = pos.assign(value=pos["value"].where(~bad, 0.0), weight=pos["weight"].where(~bad, 0.0))
     results = (market(pos, nav, scen.market_shocks)
                + groups(pos, nav, scen.group_shocks, "industry", "industry")
                + groups(pos, nav, scen.group_shocks, "cluster", "cluster")

@@ -59,7 +59,8 @@ def _grid_run(store: ResultsStore, cfg: grid.Config = CFG, version: str | None =
                     (name, version or grid.config_version(cfg)))
     prep = grid.prepare(store, cfg, "research", RULE)
     res = grid.simulate(prep, cfg)
-    m = grid._metrics(res, 1e9)
+    src = construction.Source(run_id, name, cfg, RULE, version or grid.config_version(cfg))
+    m = construction._recomputed(prep, src, res) | {"break_even_extra_cost_per_side": 0.01}
     store.con.executemany("INSERT INTO portfolio_results VALUES (?, ?, 1e9, 'v1_k1', 'strategy', ?, ?)",
                           [(run_id, name, k, float(v) * (1 + shift) if k == "cagr" else float(v)) for k, v in m.items()])
     store.finish_run(run_id)
@@ -80,7 +81,10 @@ def test_resimulation_is_deterministic_reconciles_and_writes_nothing_to_the_grid
         assert snap.positions.equals(again.positions) and rec == rec2 and snap.nav == again.nav
         assert snap.target == "construction:T1@resim" and src.run_id == RUN
         assert set(snap.curves) == {"default marks (last traded close)", "write-down 60"}
-        assert snap.reconciliation_gap == 0.0 and len(snap.positions) == 2 and all(w for *_r, w in rec)
+        assert snap.reconciliation_gap == 0.0 and len(snap.positions) == 2 and construction.reconciles(rec)
+        assert {r[0] for r in rec if r[4] is True} == set(construction.REQUIRED)
+        assert [r for r in rec if r[4] is None] == [("break_even_extra_cost_per_side", 0.01, None, None, None,
+                                                     construction.NOT_RECOMPUTED["break_even_extra_cost_per_side"])]
         assert "reconciles with it" in snap.notes[0] and "NOT the historical run" in snap.notes[0]
         mid, _, _ = construction.snapshot(store, "T1", DAYS[200])
         assert mid.valuation_date == DAYS[200]
@@ -100,7 +104,7 @@ def test_a_resimulation_that_differs_is_labelled_not_hidden(env):
     with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
         store.con.execute("UPDATE portfolio_results SET value = value * 1.001 WHERE metric = 'cagr'")
         snap, src, rec = construction.snapshot(store, "T1")
-        bad = [m for m, *_r, w in rec if not w]
+        bad = [m for m, *_r, w, _n in rec if w is False]
         run_id, _a = evaluate.evaluate(store, snap, limits.DEFAULT, NOW, reconciliation=(src.run_id, rec))
         text = report.render(store, run_id)
     assert bad == ["cagr"] and "does not reconcile with it: cagr differ" in snap.notes[0]
@@ -154,4 +158,62 @@ def test_the_stored_configuration_is_used_not_the_code_constant(env):
     with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
         _grid_run(store, name="C1", run_id="20261009T171446-portfolio-C1-research")
         snap, src, rec = construction.snapshot(store, "C1")
-    assert src.config == CFG and len(snap.positions) == 2 and all(w for *_r, w in rec)
+    assert src.config == CFG and len(snap.positions) == 2 and construction.reconciles(rec)
+
+
+def _rec(store, sql: str | None = None):
+    if sql:
+        store.con.execute(sql)
+    src = construction.source(store, "T1")
+    prep = grid.prepare(store, src.config, "research", src.rule)
+    rows = construction.reconciliation(store, src, grid.simulate(prep, src.config), prep)
+    return {r[0]: r for r in rows}, construction.reconciles(list(rows if isinstance(rows, list) else []))
+
+
+def test_reconciliation_contract(env):
+    with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
+        rows, ok = _rec(store)
+        assert ok and len(rows) == len(construction.REQUIRED) + 1
+        rows, ok = _rec(store, "DELETE FROM portfolio_results WHERE metric = 'sharpe'")        # missing stored metric
+        assert not ok and rows["sharpe"][4] is False and rows["sharpe"][5] == "missing from the stored run"
+        store.con.execute("INSERT INTO portfolio_results VALUES (?, 'T1', 1e9, 'v1_k1', 'strategy', 'sharpe', 0.1)",
+                          [RUN])
+        rows, ok = _rec(store, "UPDATE portfolio_results SET value = NULL WHERE metric = 'cagr'")   # NULL is no match
+        assert not ok and rows["cagr"][4] is False and "NULL is not a match" in rows["cagr"][5]
+        store.con.execute("UPDATE portfolio_results SET value = 0.5 WHERE metric = 'cagr'")
+        store.con.execute("INSERT INTO portfolio_results VALUES (?, 'T1', 1e9, 'v1_k1', 'strategy', 'new_metric', 1)",
+                          [RUN])
+        rows, _ok = _rec(store)
+        assert rows["new_metric"][4] is None and "not compared" in rows["new_metric"][5]
+        rows, ok = _rec(store, "DELETE FROM portfolio_results")                               # nothing to compare
+        assert not ok and all(r[4] is False for k, r in rows.items() if k in construction.REQUIRED)
+
+
+def test_participation_null_on_both_sides_is_the_declared_match():
+    from quant_research.risk.construction import NULL_EQUIVALENT, REQUIRED, reconciles
+    assert set(NULL_EQUIVALENT) == {"participation_median", "participation_p95"} <= set(REQUIRED)
+    rows = [(m, 1.0, 1.0, 0.0, True, "") for m in REQUIRED if m not in NULL_EQUIVALENT]
+    rows += [(m, None, None, None, True, NULL_EQUIVALENT[m]) for m in NULL_EQUIVALENT]
+    assert reconciles(rows) and not reconciles(rows[:-1]) and not reconciles([])
+
+
+def test_snapshot_uses_the_engine_marks_when_no_valid_close_follows_a_buy(env, monkeypatch):
+    """A position bought at the open whose closes are not valid up to the snapshot keeps the engine's mark (the buy
+    price): positions + cash equal the engine's equity."""
+    import numpy as np
+    with ResultsStore(env / "results.duckdb", env / "research.duckdb") as store:
+        src = construction.source(store, "T1")
+        prep = grid.prepare(store, src.config, "research", src.rule)
+        res = grid.simulate(prep, src.config)
+        t, j, _q, price, _c = next(tr for tr in res.trades if tr[2] > 0 and tr[0] > 40)
+        i = t + 3
+        prep.market.close[t:i + 1, j] = np.nan                     # traded, but no valid close up to the snapshot
+        monkeypatch.setattr(grid, "prepare", lambda *_a, **_k: prep)
+        dates = prep.market.dates.astype("datetime64[D]").astype(object)
+        snap, _src, _rec = construction.snapshot(store, "T1", dates[i])
+        engine = grid.simulate(prep, src.config, snapshot_at=i).state
+    held = snap.positions.set_index("symbol")
+    sym = str(prep.market.symbols[j])
+    assert held.loc[sym, "price"] == pytest.approx(price)          # the buy price, as the engine marks it
+    assert snap.nav == pytest.approx(engine["equity"]) and snap.reconciliation_gap == 0.0
+    assert held["value"].sum() + snap.cash == pytest.approx(engine["equity"])

@@ -231,13 +231,15 @@ Registry). Summary:
   - the research cutoff 2023-12-31 is enforced on every date and label end;
   - one primary test per ML experiment counts in the global FDR family;
   - no model, no data written, no engine change (only an additive `regimes.version()`);
-  - 646 tests pass; 55 mutations, all caught. Three review rounds:
+  - 649 tests pass; 60 mutations, all caught. Four review rounds:
     - first: immutable specs, a pinned baseline, the split covering the dataset period, strict purge;
     - second: a canonical regime version including `TERCILE_DIMENSIONS`; an ML factor source version that
       includes every `FactorParams` field; `check_fold` validating the fold boundaries itself;
     - third: `feature_builds` records the factor and regime parameters actually used, and `ml/builds.py`
       refuses a build that is not under the approved configuration, or whose configuration is unknown. The
       current `research.duckdb` predates this and is refused until the next `quant build`;
+    - fourth: every ML source version is bound to the feature-build code hash (`build_factors`, all build SQL,
+      regimes and costs code), so data built by other code is refused;
   - next: PR #11, the point-in-time dataset builder.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate

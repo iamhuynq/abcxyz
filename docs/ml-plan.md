@@ -431,3 +431,56 @@ Done as planned. Full suite: 646 passed (638 before).
 - **Mutation check.** 55 mutations, all caught: 47 earlier, 2 re-anchored, the regime-params mutation retired
   (parameters left that hash by design), and 9 new.
   - The old-schema mutation is caught by DuckDB's error, which is exactly the failure the check prevents.
+
+## PR #10 fourth review point (external, 2026-11-12): factor implementation not in the source version
+
+**Verified, and wider than reported.**
+- `factors.version()` hashes `RAW_SQL`, `NORMALIZE_SQL` and `FACTORS`, but not `build_factors()`, which formats
+  the parameters into the SQL and chooses the factor columns.
+- The same class of gap exists elsewhere:
+  - the `stock_features` source version is the constant `v2`, unchanged by an edit of
+    `03_stock_features.sql`;
+  - factors and regimes are computed from `daily_panel` and `stock_features`, so an upstream SQL change alters
+    them while no ML version changes.
+- `ml/builds.py` ignores `feature_builds.code_hash`, which already identifies all of this:
+  `feature_build_hash()` hashes every build SQL file and the whole of `build.py`, `factors.py` (so
+  `build_factors`), `regimes.py` and `backtest/costs.py`. It is non-NULL on every build row.
+
+**Plan.** Bind every ML source version to the feature-build implementation.
+- `source version = <table definition>:<parameter digest>@<feature build code hash>`:
+  - `stock_features`: `v2@<code>`;
+  - `stock_factors`: `f1:<factors.version()>:<FactorParams digest>@<code>`;
+  - `market_regimes`: `<regimes.version()>:<RegimeParams digest>@<code>`.
+- The approved version uses the current `feature_build_hash()`. A build's effective version uses its stored
+  `code_hash`.
+- So any change to the code that produces `research.duckdb` changes the approved versions (and every experiment
+  id). A build made by other code is refused by `check_build` until rebuilt.
+- No new column; `factors.version()` is unchanged.
+- This is deliberately coarse: an edit anywhere in the build, comments included, requires a rebuild before ML
+  accepts the data. That is the safe direction for provenance.
+
+**Tests.**
+- A changed build code hash (patched `feature_build_hash`) changes all three approved versions, and refuses a
+  feature or baseline built under the old one.
+- A build row whose `code_hash` differs from the current code is refused.
+- `factors.py`, the module that defines `build_factors`, and every build SQL file are in
+  `feature_build_files()`.
+- A default build made by the current code is accepted.
+
+### PR #10 fourth review point: result (2026-11-12)
+
+Done as planned. Full suite: 649 passed (646 before).
+
+- **Every ML source version ends with `@<feature build code hash>`.**
+  - Versions: `stock_features` `v2@<code>`; `stock_factors` `f1:<factors.version()>:<FactorParams digest>@<code>`;
+    `market_regimes` `<regimes.version()>:<RegimeParams digest>@<code>`.
+  - Approved versions use the current `feature_build_hash()`; `ml/builds.py` uses the build's stored `code_hash`.
+  - So `build_factors`, every build SQL file (upstream `daily_panel` and `stock_features` included),
+    `regimes.py` and `costs.py` are all bound. `factors.version()` is unchanged, and no column was added.
+- **Tests.**
+  - A changed build code hash changes all three approved versions and leaves the definition and parameter parts
+    as they were.
+  - Features and the baseline approved under the old code are refused.
+  - A build row with another `code_hash` is refused.
+  - `factors.py` (where `build_factors` lives) and every build SQL file are in `feature_build_files()`.
+- **Mutation check.** 60 mutations (55 earlier, four re-anchored, and 5 new), all caught.

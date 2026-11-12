@@ -39,7 +39,8 @@ def _experiment(**over) -> ExperimentSpec:
 
 
 def test_allowlisted_features_are_accepted_at_their_current_version():
-    assert F("stock_features", "return_5d").source_version == FEATURE_SET_VERSION
+    from quant_research.build import feature_build_hash
+    assert F("stock_features", "return_5d").source_version == f"{FEATURE_SET_VERSION}@{feature_build_hash()}"
     assert F("stock_factors", "momentum_12_1.z").source_version == allowlist.factor_source_version()
     assert allowlist.factor_source_version().startswith(f"{factors.FACTOR_SET}:{factors.version()}:")
     assert F("market_regimes", "risk").source_version == allowlist.regime_source_version()

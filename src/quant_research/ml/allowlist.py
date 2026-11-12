@@ -7,7 +7,7 @@ refused once that definition changes.
 """
 
 from quant_research import factors, regimes
-from quant_research.build import FEATURE_SET_VERSION
+from quant_research.build import FEATURE_SET_VERSION, feature_build_hash
 
 AVAILABILITY = "close_t"           # known at the close of the decision session t (decision after the close)
 
@@ -42,28 +42,38 @@ EXCLUDED: dict[str, str] = {
 }
 
 
-def factor_source_version(params=None, definitions: str | None = None) -> str:
-    """The version of stock_factors: the factor set, the definitions (factors.version(): SQL and factors) and a
-    canonical hash of every FactorParams field. Defaults: the current definitions with the default parameters, which
-    is the approved version used by FeatureSpec and BaselineSpec. A build's effective version passes its stored
-    definitions and parameters (ml/builds.py). factors.version() is left unchanged: recorded interaction runs
-    store it."""
+# Every source version ends with "@<feature build code hash>": feature_build_hash() covers every build SQL file and
+# the whole of build.py, factors.py (build_factors included), regimes.py and backtest/costs.py, i.e. all the code
+# that produces research.duckdb, upstream tables included. The approved version uses the current code; a build's
+# effective version uses its stored feature_builds.code_hash (ml/builds.py). Coarse on purpose: any change to the
+# build code needs a rebuild before ML accepts the data.
+
+def features_source_version(code: str | None = None) -> str:
+    """The version of stock_features: the feature set and the build code."""
+    return f"{FEATURE_SET_VERSION}@{code or feature_build_hash()}"
+
+
+def factor_source_version(params=None, definitions: str | None = None, code: str | None = None) -> str:
+    """The version of stock_factors: the factor set, the definitions (factors.version(): SQL and factors), a
+    canonical hash of every FactorParams field and the build code. Defaults: the current definitions, default
+    parameters and current code, i.e. the approved version used by FeatureSpec and BaselineSpec. factors.version()
+    is left unchanged: recorded interaction runs store it."""
     from quant_research.ml.canonical import digest
     params = factors.FactorParams() if params is None else params
-    return f"{factors.FACTOR_SET}:{definitions or factors.version()}:{digest(params)[:8]}"
+    return f"{factors.FACTOR_SET}:{definitions or factors.version()}:{digest(params)[:8]}@{code or feature_build_hash()}"
 
 
-def regime_source_version(params=None, definitions: str | None = None) -> str:
-    """The version of market_regimes: the definitions (regimes.version()) and a canonical hash of every RegimeParams
-    field; defaults as for factor_source_version."""
+def regime_source_version(params=None, definitions: str | None = None, code: str | None = None) -> str:
+    """The version of market_regimes: the definitions (regimes.version()), a canonical hash of every RegimeParams
+    field and the build code; defaults as for factor_source_version."""
     from quant_research.ml.canonical import digest
     params = regimes.RegimeParams() if params is None else params
-    return f"{definitions or regimes.version()}:{digest(params)[:8]}"
+    return f"{definitions or regimes.version()}:{digest(params)[:8]}@{code or feature_build_hash()}"
 
 
 def source_version(table: str) -> str:
     if table == "stock_features":
-        return FEATURE_SET_VERSION
+        return features_source_version()
     if table == "stock_factors":
         return factor_source_version()
     if table == "market_regimes":

@@ -30,13 +30,13 @@ def build_source_versions(con: duckdb.DuckDBPyConnection, build_id: str, schema:
     if absent:                          # a research.duckdb built before 2026-11-12: the old schema
         raise ContractError(f"feature_builds has no {', '.join(absent)}: the configuration of every build is "
                             "unknown (built before 2026-11-12); rebuild with `quant build`")
-    cur = con.execute(f"SELECT feature_set_version, {', '.join(META)} FROM {schema}feature_builds WHERE build_id = ?",
-                      [build_id])
+    cur = con.execute(f"SELECT {', '.join(META)}, feature_set_version, code_hash FROM {schema}feature_builds "
+                      "WHERE build_id = ?", [build_id])
     row = cur.fetchone()
     if row is None:
         raise ContractError(f"no feature build {build_id}")
-    feature_set, factor_params, regime_params, factors_v, regimes_v = row
-    missing = [name for name, v in zip(META, row[1:]) if v is None]
+    factor_params, regime_params, factors_v, regimes_v, feature_set, code = row
+    missing = [name for name, v in zip((*META, "feature_set_version", "code_hash"), row) if v is None]
     if missing:
         raise ContractError(f"feature build {build_id} has no {', '.join(missing)}: its configuration is unknown "
                             "(built before 2026-11-12); rebuild with `quant build`")
@@ -45,9 +45,9 @@ def build_source_versions(con: duckdb.DuckDBPyConnection, build_id: str, schema:
         rp = regimes.RegimeParams(**json.loads(regime_params))
     except (TypeError, ValueError) as exc:
         raise ContractError(f"feature build {build_id}: stored parameters do not match the current fields: {exc}")
-    return {"stock_features": feature_set,
-            "stock_factors": allowlist.factor_source_version(fp, factors_v),
-            "market_regimes": allowlist.regime_source_version(rp, regimes_v)}
+    return {"stock_features": f"{feature_set}@{code}",
+            "stock_factors": allowlist.factor_source_version(fp, factors_v, code),
+            "market_regimes": allowlist.regime_source_version(rp, regimes_v, code)}
 
 
 def check_build(con: duckdb.DuckDBPyConnection, build_id: str, dataset: DatasetSpec,

@@ -45,7 +45,8 @@ def test_a_default_build_records_its_configuration_and_is_accepted(warehouse, tm
     assert json.loads(row[0]) == dataclasses.asdict(FactorParams()) and row[2] == factors.version()
     assert json.loads(row[1]) == dataclasses.asdict(RegimeParams())
     versions = build_source_versions(con, bid)
-    assert versions == {"stock_features": "v2", "stock_factors": allowlist.factor_source_version(),
+    assert versions == {"stock_features": allowlist.features_source_version(),
+                        "stock_factors": allowlist.factor_source_version(),
                         "market_regimes": allowlist.regime_source_version()}
     check_build(con, bid, DATASET, BASELINE)
     con.close()
@@ -127,4 +128,41 @@ def test_attached_research_database_through_a_schema(warehouse, tmp_path):
     con.close()
     with duckdb.connect() as c:
         c.execute(f"ATTACH '{(tmp_path / 'r.duckdb').as_posix()}' AS rs (READ_ONLY)")
-        assert build_source_versions(c, bid, schema="rs.")["stock_features"] == "v2"
+        assert build_source_versions(c, bid, schema="rs.")["stock_features"] == allowlist.features_source_version()
+
+
+def test_every_source_version_is_bound_to_the_build_code(monkeypatch):
+    old = {t: allowlist.source_version(t) for t in allowlist.ALLOWED}
+    old_feats = {t: F(t, allowlist.ALLOWED[t][0]) for t in allowlist.ALLOWED}
+    old_baseline = BaselineSpec.current("order_flow")
+    monkeypatch.setattr(allowlist, "feature_build_hash", lambda: "0123456789abcdef")      # the build code changed
+    new = {t: allowlist.source_version(t) for t in allowlist.ALLOWED}
+    assert all(new[t] != old[t] and new[t].endswith("@0123456789abcdef") for t in new)
+    assert all(new[t].split("@")[0] == old[t].split("@")[0] for t in new)          # definitions and params as before
+    for t, f in old_feats.items():
+        with pytest.raises(ContractError, match="definition changed"):
+            FeatureSpec(f.table, f.column, f.source_version)
+    with pytest.raises(ContractError, match="factor definitions changed"):
+        BaselineSpec("order_flow", old_baseline.source_version)
+
+
+def test_a_build_made_by_other_code_is_refused(warehouse, tmp_path):
+    path = tmp_path / "r.duckdb"
+    con, bid = _build(warehouse, path)
+    con.close()
+    with duckdb.connect(str(path)) as rw:
+        rw.execute("UPDATE feature_builds SET code_hash = 'ffffffffffffffff'")
+    with duckdb.connect(str(path), read_only=True) as con:
+        assert all(v.endswith("@ffffffffffffffff") for v in build_source_versions(con, bid).values())
+        with pytest.raises(ContractError, match="stock_features.return_5d"):
+            check_build(con, bid, DATASET)
+
+
+def test_the_build_code_hash_covers_the_factor_implementation_and_every_build_sql():
+    import inspect
+    from pathlib import Path
+    from quant_research.build import feature_build_files, sql_files
+    files = feature_build_files()
+    assert Path(inspect.getsourcefile(factors.build_factors)).name == "factors.py" and "factors.py" in files
+    assert {"regimes.py", "build.py", "backtest/costs.py"} <= set(files)
+    assert {f"sql/{name}" for name, _ in sql_files()} <= set(files)

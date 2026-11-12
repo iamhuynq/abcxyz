@@ -749,3 +749,21 @@ Full suite: 687 passed (677 before). Scope unchanged: no model, no runner.
   - One first survived: the period comparison, because for a research-only dataset every crossing is also past
     the cutoff and the two rules masked each other. The hand-made test now checks each rule on its own, and
     removing either rule is caught.
+
+### PR #11 second review: result (2026-11-12)
+
+Full suite: 688 passed (687 before).
+
+- **P2-1: stale publish lock.**
+  - The lock file records `{pid, host, created, token}`.
+  - A lock is recovered only when it is on the same host and its pid no longer runs. Recovery renames the lock to
+    a unique name, re-reads it, and gives it back if its content changed (a live lock taken in between), so a
+    live lock is never removed. Age is never used.
+  - A lock that cannot be checked (another host, unreadable content) is kept, and the error gives the manual
+    recovery: make sure no publisher runs, then delete the `.lock` file.
+  - Test: a lock left by an exited process is recovered and the artifact is published; a lock held by a live pid,
+    or written on another host, is kept unchanged and refused.
+- **P2-2: `np.datetime64("NaT")`** canonicalizes to null, with a regression assertion.
+- **Mutation check.** 24 mutations, all caught (20 earlier plus 4 new): NaT not null, stale lock never
+  recovered, live lock treated as stale, other host trusted.
+- CI is confirmed by the user on the pushed head.

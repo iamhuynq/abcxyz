@@ -12,6 +12,8 @@ import json
 import math
 import os
 import shutil
+import socket
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -124,6 +126,8 @@ def _cell(v):
         return (0.0 if f == 0.0 else f).hex()
     if isinstance(v, (pd.Timestamp, datetime, np.datetime64)):
         t = pd.Timestamp(v)
+        if pd.isna(t):                                   # np.datetime64("NaT") is missing, like pd.NaT
+            return None
         return t.date().isoformat() if t == t.normalize() and t.tzinfo is None else t.isoformat()
     if isinstance(v, date):
         return v.isoformat()
@@ -191,15 +195,66 @@ def write_dataset(result: DatasetResult, path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_name(f".{path.name}.lock")
-    try:                                              # one publisher per path: O_EXCL is atomic across processes
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise FileExistsError(f"{path} is being published by another process") from None
-    os.close(fd)
+    _acquire(lock, path)
     try:
         return _publish(result, path)
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _owner() -> str:
+    return json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "created": time.time(),
+                       "token": uuid.uuid4().hex})
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:                           # exists, owned by another user
+        return True
+    return True
+
+
+def _acquire(lock: Path, path: Path) -> None:
+    """One publisher per path. The lock file (created with O_EXCL, atomic across processes) records its owner's pid,
+    host, creation time and a token. A lock left by a crashed publisher (same host, pid no longer running) is
+    recovered: it is renamed away and its content re-checked, so a live lock taken meanwhile is never removed. A
+    lock is never removed because of its age. Manual recovery, when the owner cannot be checked (another host, an
+    unreadable lock): make sure no publisher runs, then delete the .lock file."""
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w") as f:
+                f.write(_owner())
+            return
+        try:
+            text = lock.read_text()
+            owner = json.loads(text)
+            stale = owner["host"] == socket.gethostname() and not _alive(int(owner["pid"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            text, stale = None, False
+        if not stale:
+            raise FileExistsError(f"{path} is being published by another process (lock {lock}); if no publisher "
+                                  "is running, delete the lock file")
+        moved = lock.with_name(f"{lock.name}.stale-{uuid.uuid4().hex}")
+        try:
+            os.rename(lock, moved)
+        except FileNotFoundError:
+            continue                                  # another publisher recovered it first
+        if moved.read_text() != text:                 # a live lock was taken in between: give it back, refuse
+            try:
+                os.link(moved, lock)
+            except FileExistsError:
+                pass
+            moved.unlink(missing_ok=True)
+            raise FileExistsError(f"{path} is being published by another process (lock {lock})")
+        moved.unlink(missing_ok=True)
+    raise FileExistsError(f"{path}: could not acquire the publish lock {lock}")
 
 
 def _publish(result: DatasetResult, path: Path) -> Path:

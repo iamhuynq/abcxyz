@@ -307,7 +307,7 @@ def test_canonical_cells():
     import numpy as np
     c = dataset._cell
     assert c(np.int64(3)) == c(3) == 3 and c(np.float32(0.5)) == c(0.5) == (0.5).hex()
-    assert c(float("nan")) is None and c(None) is None and c(pd.NaT) is None
+    assert c(float("nan")) is None and c(None) is None and c(pd.NaT) is None and c(np.datetime64("NaT", "ns")) is None
     assert c(float("inf")) == "inf" and c(float("-inf")) == "-inf"
     assert c(-0.0) == c(0.0) and c(np.bool_(True)) is True and c(False) is False
     assert c(pd.Timestamp("2023-01-02")) == c(date(2023, 1, 2)) == c(np.datetime64("2023-01-02")) == "2023-01-02"
@@ -336,9 +336,10 @@ def test_concurrent_publishers_never_overwrite(research, tmp_path):
     assert sorted(results) == ["ok", "refused", "refused", "refused"]
     assert dataset.read_dataset(target)[1]["fingerprint"] == r.fingerprint
     assert not list(tmp_path.glob(".shared.*"))                            # no lock or temp left
-    (tmp_path / ".other.lock").write_text("")                              # a publisher in progress
+    (tmp_path / ".other.lock").write_text("")                              # unreadable: never removed
     with pytest.raises(FileExistsError, match="being published"):
         dataset.write_dataset(r, tmp_path / "other")
+    assert (tmp_path / ".other.lock").exists()
 
 
 def test_excluded_candidates_get_intervals_from_the_full_series(research):
@@ -371,3 +372,24 @@ def test_each_crossing_rule_works_on_its_own():
         base | dict(date=date(2023, 12, 20), label_end=date(2023, 12, 22), decision_period="research",
                     label_end_period="research")])                     # neither: kept
     assert dataset._status(df, spec).tolist() == ["label_crosses_period", "label_crosses_period", "kept"]
+
+
+def test_a_lock_left_by_a_crashed_publisher_is_recovered_but_a_live_one_is_not(research, tmp_path):
+    import json
+    import socket
+    with _con(research) as con:
+        r = dataset.build_dataset(con, _spec(), _build_id(con))
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()                                                          # its pid no longer runs
+    lock = tmp_path / ".ds.lock"
+    owner = {"host": socket.gethostname(), "created": 0, "token": "x"}
+    lock.write_text(json.dumps(owner | {"pid": dead.pid}))
+    dataset.write_dataset(r, tmp_path / "ds")                            # stale: recovered
+    assert (tmp_path / "ds").exists() and not lock.exists() and not list(tmp_path.glob(".ds.lock.stale-*"))
+    for live in (owner | {"pid": os.getpid()}, owner | {"pid": dead.pid, "host": "another-host"}):
+        lock2 = tmp_path / ".ds2.lock"
+        lock2.write_text(json.dumps(live))                               # alive, or not checkable: kept
+        with pytest.raises(FileExistsError, match="delete the lock file"):
+            dataset.write_dataset(r, tmp_path / "ds2")
+        assert json.loads(lock2.read_text()) == live
+        lock2.unlink()

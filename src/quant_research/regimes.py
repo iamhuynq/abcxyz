@@ -5,6 +5,8 @@ value within the trailing window of sessions (today included); no threshold is t
 the rule declared in the plan before any outcome was looked at.
 """
 
+import hashlib
+import inspect
 from dataclasses import dataclass
 
 import duckdb
@@ -101,3 +103,11 @@ def build_regimes(con: duckdb.DuckDBPyConnection, params: RegimeParams = RegimeP
         FROM l ORDER BY date""")
     con.execute("DROP TABLE regime_values")
     return con.execute("SELECT count(*) FROM market_regimes").fetchone()[0]
+
+
+def version() -> str:
+    """Hash of the regime definitions (SQL, dimensions, default parameters, labelling and risk rule): changes
+    whenever the meaning of a regime label changes, like factors.version()."""
+    text = (VALUES_SQL + inspect.getsource(_percentile_sql) + inspect.getsource(_state_sql)
+            + inspect.getsource(build_regimes) + repr(sorted(DIMENSIONS.items())) + repr(RegimeParams()))
+    return hashlib.sha256(text.encode()).hexdigest()[:8]

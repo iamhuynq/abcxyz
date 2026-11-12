@@ -79,6 +79,23 @@ def purge(train: pd.DataFrame, fold: Fold) -> pd.Series:
     return (d >= fold.train_start) & (d <= fold.train_end) & (end < fold.embargo_start)
 
 
+def _check_boundaries(fold: Fold, split: SplitSpec) -> None:
+    """The fold itself, independently of folds(): every boundary inside [split.first_date, split.last_date] and in
+    order train_start <= train_end < test_start <= test_end, train_start < embargo_start <= test_start."""
+    dates = {"train_start": fold.train_start, "train_end": fold.train_end, "embargo_start": fold.embargo_start,
+             "test_start": fold.test_start, "test_end": fold.test_end}
+    outside = [k for k, d in dates.items() if not split.first_date <= d <= split.last_date]
+    if outside:
+        raise ContractError(f"fold {fold.index}: {', '.join(outside)} outside the split "
+                            f"{split.first_date}..{split.last_date}")
+    if not (fold.train_start <= fold.train_end < fold.test_start <= fold.test_end):
+        raise ContractError(f"fold {fold.index}: boundaries out of order (train {fold.train_start}..{fold.train_end}, "
+                            f"test {fold.test_start}..{fold.test_end})")
+    if not (fold.train_start < fold.embargo_start <= fold.test_start):
+        raise ContractError(f"fold {fold.index}: embargo_start {fold.embargo_start} not inside "
+                            f"({fold.train_start}, {fold.test_start}]")
+
+
 def check_fold(train: pd.DataFrame, test: pd.DataFrame, fold: Fold, split: SplitSpec) -> None:
     """Raise unless the fold is leakage-safe. Both frames have columns date, label_start, label_end."""
     for name, df in (("train", train), ("test", test)):
@@ -89,6 +106,7 @@ def check_fold(train: pd.DataFrame, test: pd.DataFrame, fold: Fold, split: Split
                 raise ContractError(f"{name}: {col} after the research cutoff {RESEARCH_END}")
     if fold.test_end > RESEARCH_END:
         raise ContractError(f"fold {fold.index} ends after the research cutoff {RESEARCH_END}")
+    _check_boundaries(fold, split)
     td = pd.to_datetime(train["date"]).dt.date
     if (td >= fold.test_start).any() or (td < fold.train_start).any():
         raise ContractError(f"fold {fold.index}: training rows outside the training window")

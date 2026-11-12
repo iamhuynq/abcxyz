@@ -42,11 +42,19 @@ EXCLUDED: dict[str, str] = {
 }
 
 
+def factor_source_version() -> str:
+    """The one version of stock_factors used by FeatureSpec and BaselineSpec: the factor set, factors.version() (the
+    SQL and definitions) and a canonical hash of every FactorParams default (scoring universe, minimum stocks and
+    industry size, winsor level). factors.version() is left unchanged: recorded interaction runs store it."""
+    from quant_research.ml.canonical import digest
+    return f"{factors.FACTOR_SET}:{factors.version()}:{digest(factors.FactorParams())[:8]}"
+
+
 def source_version(table: str) -> str:
     if table == "stock_features":
         return FEATURE_SET_VERSION
     if table == "stock_factors":
-        return f"{factors.FACTOR_SET}:{factors.version()}"
+        return factor_source_version()
     if table == "market_regimes":
         return regimes.version()
     raise KeyError(table)

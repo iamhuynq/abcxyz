@@ -5,8 +5,10 @@ value within the trailing window of sessions (today included); no threshold is t
 the rule declared in the plan before any outcome was looked at.
 """
 
+import dataclasses
 import hashlib
 import inspect
+import json
 from dataclasses import dataclass
 
 import duckdb
@@ -106,8 +108,13 @@ def build_regimes(con: duckdb.DuckDBPyConnection, params: RegimeParams = RegimeP
 
 
 def version() -> str:
-    """Hash of the regime definitions (SQL, dimensions, default parameters, labelling and risk rule): changes
-    whenever the meaning of a regime label changes, like factors.version()."""
-    text = (VALUES_SQL + inspect.getsource(_percentile_sql) + inspect.getsource(_state_sql)
-            + inspect.getsource(build_regimes) + repr(sorted(DIMENSIONS.items())) + repr(RegimeParams()))
+    """Hash of every input that defines a regime label: the values SQL, the percentile, state and build code (the
+    risk rule lives in build_regimes), DIMENSIONS, TERCILE_DIMENSIONS and every RegimeParams default. Canonical JSON
+    (sorted keys), so dictionary order and object repr() do not matter. Changes whenever a label's meaning can."""
+    payload = {"values_sql": VALUES_SQL,
+               "code": [inspect.getsource(f) for f in (_percentile_sql, _state_sql, build_regimes)],
+               "dimensions": {k: [list(states), what] for k, (states, what) in DIMENSIONS.items()},
+               "tercile_dimensions": list(TERCILE_DIMENSIONS),
+               "params": dataclasses.asdict(RegimeParams())}
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(text.encode()).hexdigest()[:8]

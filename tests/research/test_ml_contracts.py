@@ -40,7 +40,8 @@ def _experiment(**over) -> ExperimentSpec:
 
 def test_allowlisted_features_are_accepted_at_their_current_version():
     assert F("stock_features", "return_5d").source_version == FEATURE_SET_VERSION
-    assert F("stock_factors", "momentum_12_1.z").source_version == f"{factors.FACTOR_SET}:{factors.version()}"
+    assert F("stock_factors", "momentum_12_1.z").source_version == allowlist.factor_source_version()
+    assert allowlist.factor_source_version().startswith(f"{factors.FACTOR_SET}:{factors.version()}:")
     assert F("market_regimes", "risk").source_version == regimes.version()
     assert set(allowlist.STOCK_FACTORS) == {f"{f}.{field}" for f in ("liquidity", "momentum_12_1", "momentum_1m",
                                                                         "reversal_1w", "volatility", "beta", "order_flow",
@@ -220,7 +221,8 @@ def test_specs_are_deeply_immutable_against_caller_objects():
 
 def test_baseline_is_version_pinned(monkeypatch):
     b = BaselineSpec.current("order_flow")
-    assert b.source_version == f"{factors.FACTOR_SET}:{factors.version()}" and b.field == "rank_pct"
+    assert b.source_version == allowlist.factor_source_version() == F("stock_factors", "order_flow.z").source_version
+    assert b.field == "rank_pct"
     with pytest.raises(ContractError, match="factor definitions changed"):
         BaselineSpec("order_flow", "f1:00000000")
     with pytest.raises(ContractError, match="not a Factor Engine factor"):
@@ -250,3 +252,42 @@ def test_wrong_types_raise_contract_errors():
                 lambda: _dataset(universe=1), lambda: _dataset(label="fwd_ret_exec_10d")):
         with pytest.raises(ContractError):
             bad()
+
+
+def _factor_params_variants():
+    import dataclasses
+    for f in dataclasses.fields(factors.FactorParams):
+        default = getattr(factors.FactorParams(), f.name)
+        yield f.name, type(default)(default * 2 + 1)
+
+
+@pytest.mark.parametrize("name, value", list(_factor_params_variants()))
+def test_every_factor_parameter_is_in_the_ml_source_version_and_old_versions_are_refused(monkeypatch, name, value):
+    import functools
+    old = allowlist.factor_source_version()
+    old_feature, old_baseline = F("stock_factors", "order_flow.rank_pct"), BaselineSpec.current("order_flow")
+    monkeypatch.setattr(factors, "FactorParams", functools.partial(factors.FactorParams, **{name: value}))
+    new = allowlist.factor_source_version()
+    assert new != old and new.split(":")[:2] == old.split(":")[:2]      # factors.version() itself is unchanged
+    with pytest.raises(ContractError, match="definition changed"):
+        FeatureSpec("stock_factors", "order_flow.rank_pct", old_feature.source_version)
+    with pytest.raises(ContractError, match="factor definitions changed"):
+        BaselineSpec("order_flow", old_baseline.source_version)
+    assert F("stock_factors", "order_flow.rank_pct").source_version == new
+
+
+def test_regime_version_covers_every_input_canonically(monkeypatch):
+    import functools
+    base = regimes.version()
+    changes = [("TERCILE_DIMENSIONS", ("volatility", "liquidity", "breadth")),
+               ("DIMENSIONS", {**regimes.DIMENSIONS, "risk": (("off", "neutral", "on"), "renamed states")}),
+               ("VALUES_SQL", regimes.VALUES_SQL.replace("ROWS BETWEEN 19 PRECEDING", "ROWS BETWEEN 9 PRECEDING")),
+               ("RegimeParams", functools.partial(regimes.RegimeParams, window=499)),
+               ("RegimeParams", functools.partial(regimes.RegimeParams, drawdown_off=-0.25))]
+    for name, value in changes:
+        with monkeypatch.context() as m:
+            m.setattr(regimes, name, value)
+            assert regimes.version() != base, name
+    assert regimes.version() == base
+    monkeypatch.setattr(regimes, "DIMENSIONS", dict(reversed(list(regimes.DIMENSIONS.items()))))
+    assert regimes.version() == base                                  # dictionary order does not matter

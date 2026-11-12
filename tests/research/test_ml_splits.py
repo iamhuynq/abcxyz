@@ -132,3 +132,32 @@ def test_purge_drops_rows_decided_before_a_rolling_training_window():
     f = folds(CAL, replace(SPLIT, kind="rolling", train_sessions=10))[1]       # training CAL[5]..CAL[14]
     rows = _rows([CAL[2], CAL[6]], [CAL[4], CAL[8]])
     assert f.train_start == CAL[5] and purge(rows, f).tolist() == [False, True]
+
+
+
+@pytest.mark.parametrize("fold, why", [
+    (Fold(0, date(2022, 12, 1), date(2023, 11, 30), date(2023, 12, 1), date(2023, 12, 29), date(2023, 11, 28)),
+     "train_start outside the split"),                                 # ordered, but starts before the split
+    (Fold(0, date(2023, 1, 2), date(2023, 11, 30), date(2023, 12, 1), date(2023, 12, 31), date(2023, 11, 28)),
+     "test_end outside the split"),                                    # before the cutoff, after split.last_date
+    (Fold(0, date(2023, 6, 1), date(2023, 5, 1), date(2023, 12, 1), date(2023, 12, 29), date(2023, 4, 28)),
+     "out of order"),                                                  # train_start after train_end
+    (Fold(0, date(2023, 1, 2), date(2023, 12, 1), date(2023, 12, 1), date(2023, 12, 29), date(2023, 11, 28)),
+     "out of order"),                                                  # train_end not before test_start
+    (Fold(0, date(2023, 1, 2), date(2023, 11, 30), date(2023, 12, 29), date(2023, 12, 1), date(2023, 11, 28)),
+     "out of order"),                                                  # test_start after test_end
+    (Fold(0, date(2023, 1, 2), date(2023, 11, 30), date(2023, 12, 1), date(2023, 12, 29), date(2023, 12, 4)),
+     "embargo_start"),                                                 # embargo inside the test window
+    (Fold(0, date(2023, 1, 2), date(2023, 11, 30), date(2023, 12, 1), date(2023, 12, 29), date(2023, 1, 2)),
+     "embargo_start"),                                                 # embargo at train_start: no training left
+])
+def test_check_fold_validates_the_fold_itself(fold, why):
+    with pytest.raises(ContractError, match=why):
+        check_fold(TRAIN.iloc[0:0], TEST, fold, SPLIT)
+
+
+def test_generated_folds_pass_the_independent_boundary_check():
+    from quant_research.ml.splits import _check_boundaries
+    for split in (SPLIT, replace(SPLIT, kind="rolling", train_sessions=10), replace(SPLIT, embargo_sessions=0)):
+        for f in folds(CAL, split):
+            _check_boundaries(f, split)

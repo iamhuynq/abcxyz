@@ -296,3 +296,50 @@ Done as planned. Full suite: 624 passed (616 before).
   - the training-window purge had no row decided before a rolling window, so a test was added;
   - the "bool as int" mutation first disabled every type check instead of only the bool clause, so it was
     rewritten.
+
+## PR #10 second review (external, 2026-11-12, head `653b2c1`): assessment and plan
+
+Both findings were reproduced:
+- setting `regimes.TERCILE_DIMENSIONS` to another tuple leaves `regimes.version()` unchanged;
+- `check_fold` accepts a fold that starts before the split and ends after `split.last_date` (2023-12-31 against
+  2023-12-29), because both dates are before the research cutoff.
+
+The audit of the other version inputs found the same gap in the factor source version:
+- `factors.version()` hashes the factor SQL and definitions but not the `FactorParams` defaults (scoring
+  universe ADV and sessions, minimum stocks, minimum industry size, winsor level), and all of them change the
+  scores.
+- `factors.version()` is also stored as the `pattern_version` of the recorded interaction run, so changing that
+  function would relabel a stored run whose definitions did not change.
+
+| Point | Action |
+|---|---|
+| `regimes.version()` omits `TERCILE_DIMENSIONS` | Add it to the hashed input. `regimes.version()` is new in this PR, so nothing stored uses it yet. The audit of `regimes.py` finds no other module-level input: `DIMENSIONS`, `TERCILE_DIMENSIONS`, `VALUES_SQL`, the three functions and the `RegimeParams` defaults are all hashed. Tests, each through `monkeypatch`: changing `TERCILE_DIMENSIONS`, `DIMENSIONS`, `VALUES_SQL` or a `RegimeParams` default changes the version. |
+| Factor source version omits `FactorParams` | The ML source version of `stock_factors` becomes `f1:<factors.version()>:<digest of FactorParams()>`. `factors.version()` itself is unchanged, so the stored interaction run keeps its meaning. Test: changing a `FactorParams` default (for example `winsor`) changes the ML source version, so the feature and the baseline are refused until approved again. |
+| `check_fold` does not validate the fold against the split | `check_fold` checks `fold.train_start >= split.first_date` and `fold.test_end <= split.last_date`, and the ordering `train_start < embargo_start <= test_start`, `train_end < test_start <= test_end`. Tests: a fold starting before the split, one ending after `split.last_date` but before the cutoff, and each ordering violation are refused. |
+| CI | Confirmed by the user from the run of the pushed head. |
+
+### PR #10 second review fixes: result (2026-11-12)
+
+Done as planned, with the reviewer's additional conditions. Full suite: 638 passed (624 before).
+
+- **`regimes.version()`.** It now hashes canonical JSON (sorted keys, fixed separators) of:
+  - the values SQL and the source of the percentile, state and build functions (the risk rule lives in
+    `build_regimes`);
+  - `DIMENSIONS` (states and descriptions) and `TERCILE_DIMENSIONS`;
+  - every `RegimeParams` default, via `asdict`.
+
+  `repr()` is no longer used. The audit found no other module-level input in `regimes.py`.
+  - Tests: changing `TERCILE_DIMENSIONS`, `DIMENSIONS`, `VALUES_SQL` or a `RegimeParams` default (two of them)
+    changes the version, each tested independently; reordering `DIMENSIONS` does not.
+- **`allowlist.factor_source_version()`.** It is the single source used by both `FeatureSpec` and
+  `BaselineSpec`: `f1:<factors.version()>:<canonical digest of every FactorParams field>`.
+  - `factors.version()` is unchanged, so the recorded interaction run keeps its meaning.
+  - Test, parametrized over every `FactorParams` field: changing that default changes the ML version, keeps
+    the `f1:<factors.version()>` prefix, and refuses a feature or a baseline built with the old version.
+- **`check_fold` is an independent guard.** It checks the fold itself, not only the rows: all five boundaries
+  must lie in `[split.first_date, split.last_date]`, with `train_start <= train_end < test_start <= test_end`
+  and `train_start < embargo_start <= test_start`.
+  - Tests cover a fold correctly ordered but starting before the split, one ending after `split.last_date` yet
+    before the cutoff, and each ordering and embargo violation.
+  - Every fold that `folds()` produces (expanding, rolling, embargo 0) passes the same check.
+- **Mutation check.** 47 mutations (38 earlier plus 9 new), all caught by an assertion.

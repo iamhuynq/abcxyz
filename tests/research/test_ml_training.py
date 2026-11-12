@@ -297,3 +297,11 @@ def test_fitted_model_names_must_be_approved():
 def test_model_code_hash_covers_model_code_only():
     assert training.MODEL_CODE_FILES == ("canonical.py", "contracts.py", "dataset.py", "models.py", "training.py")
     assert training.model_code_hash() == training.model_code_hash()
+
+
+def test_built_datasets_have_only_finite_labels_and_features(ds):
+    """The finite-label invariant that the walk-forward evaluation relies on: 01_daily_panel.sql drops every row with
+    a price <= 0 (the synthetic warehouse has one zero-price session), so close / open - 1 is finite; NULL labels
+    and features are excluded by the builder."""
+    values = ds.data[list(ds.data.columns[2:6])].to_numpy(dtype=np.float64)
+    assert len(values) > 0 and np.isfinite(values).all()

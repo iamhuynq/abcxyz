@@ -24,7 +24,7 @@ Last updated: 2026-11-11. Update this file at the end of every task.
 | 4 Cross-stock | Built; 4b industry groups built | `cross-stock-*.md`, `group-analysis-*.md`, `group-momentum-validation-2026-10-08.md` |
 | 5 Event engine | Built (catalog v1, 12 types, event study) | `event-engine-plan.md` |
 | 6 Backtesting | Built; holdout failed; forward paper trading running | `backtest-plan.md`, `backtest-results-2026-10-04.md` |
-| 7 Machine learning | Not started | - |
+| 7 Machine learning | Started: PR #10 foundation (contracts, splits) | `ml-plan.md` |
 
 Also built: Streamlit UI (`ui-plan.md`), Market watch dashboard (`dashboard-plan.md`), run provenance and
 Exposure Engine (`provenance-exposure-plan.md`), Research Registry (`research-registry-plan.md`),
@@ -224,6 +224,15 @@ Registry). Summary:
     - stress rejects non-finite betas, ADV and values;
     - the suspension write-down is labelled as an assumption;
     - 565 tests pass; 30 + 34 mutations, all caught.
+- PR #9 (Risk Engine PR 2) merged into `main` (`c6ff618`).
+- ML, Step 9 (plan `ml-plan.md`). PR #10, the ML foundation (branch `ml-foundation`, not pushed):
+  - contracts, a feature allowlist with source versions, deterministic SHA-256 hashes (`ml/1`), walk-forward
+    folds, interval purge with an embargo gap, and fold checks;
+  - the research cutoff 2023-12-31 is enforced on every date and label end;
+  - one primary test per ML experiment counts in the global FDR family;
+  - no model, no data written, no engine change (only an additive `regimes.version()`);
+  - 616 tests pass; 28 mutations, all caught;
+  - next: PR #11, the point-in-time dataset builder.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

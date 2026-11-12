@@ -169,3 +169,64 @@ ML experiment in the global FDR family. It adds three requirements, all taken in
   - the contract version changes it.
 
 The acceptance in section 5 is extended accordingly. No other change to the plan.
+
+## 7. Leakage threats and the rule that blocks each (PR #10)
+
+| Threat (spec) | Blocked by | Test |
+|---|---|---|
+| A feature known after its decision date | Only `close_t` features from approved point-in-time tables (allowlist, source version); `keys.check_point_in_time` refuses rows dated after their decision | `test_ml_contracts`: availability, source version, excluded sources, future feature rows |
+| An outcome used as a feature | `stock_targets` and `feature_target` are excluded sources | excluded-source test |
+| A source revised after the decision | Source versions: a feature approved under one definition is refused once it changes. Row-level revisions are covered by the integrity perturbation tests of the approved tables | source-version test |
+| A label interval overlapping the test period | `purge` uses actual label end dates; `check_fold` raises if any training label reaches the embargo gap or the test window | `test_ml_splits`: purge with a suspended symbol, check_fold cases |
+| Random shuffling | `SplitSpec.kind` is `expanding` or `rolling`; there is no shuffle field | split rules test |
+| Validation or holdout data | `RESEARCH_END` invariant in `DatasetSpec`, `SplitSpec`, `folds` and `check_fold`, including label ends | cutoff tests (2023-12-31 accepted, 2024-01-01 refused, test window or label crossing refused) |
+| Duplicate observations | `keys.check_unique` refuses them | key test |
+| A non-reproducible spec | Canonical SHA-256 hashes with the contract version | hash tests across processes |
+| Preprocessing fitted on the full dataset | Not in PR #10 (no preprocessing yet). PR #12 must fit on each fold's training rows only, with a test | to add in PR #12 |
+| A universe member before its membership date, a stale exit price | The point-in-time universe and NULL incomplete labels already exist; the dataset builder must keep them | adversarial tests to add in PR #11 |
+
+PR #11 adds the adversarial dataset tests:
+- a feature row dated one session late;
+- a revised source row;
+- a stock before its first traded date;
+- a missing exit price;
+- a duplicate key.
+
+## Result, PR #10 (2026-11-12)
+
+Branch `ml-foundation`. Full suite: 616 passed (565 before). The only change outside `ml/` is an additive
+`regimes.version()`; no engine behaviour and no stored data change.
+
+- `ml/canonical.py`:
+  - canonical JSON (sorted keys, fixed separators; ISO dates; tuples as lists; dataclasses by field; finite
+    floats only; any other type refused);
+  - contract `ml/1` wraps every payload; digest is SHA-256, 16 hex characters.
+- `ml/allowlist.py`:
+  - `stock_features`: the 30 reference-checked columns (a test ties the list to the reference test);
+  - `stock_factors`: 27 entries (9 factors x `rank_pct` / `z` / `z_industry`);
+  - `market_regimes`: the 6 states.
+  - Source versions: `v2`, `f1:<factors.version()>` and `regimes.version()`.
+  - Excluded sources are refused with a named reason; any other table or unlisted column is refused too.
+- `ml/contracts.py`: `FeatureSpec`, `LabelSpec` (executable `stock_targets` labels only, with a matching
+  horizon; entry `open_t+1`, exit `close_t+h`, gross, per-horizon masks), `DatasetSpec` (unique features, the
+  point-in-time universe, fingerprint including the universe SQL), `SplitSpec` (`expanding` or `rolling`, no
+  shuffle) and `ExperimentSpec` (hypothesis, approved model family, seed, Factor Engine baseline, declared
+  primary test). The research cutoff is checked on every date.
+- `ml/splits.py`:
+  - `folds` (deterministic; complete test windows only);
+  - `purge` (actual label ends);
+  - `check_fold` (raises on any leak, including the cutoff and label ends);
+  - `session_offset`.
+- `ml/keys.py`: `check_unique`, `check_point_in_time`.
+- Embargo semantics, made precise in the code: walk-forward training always precedes the test window, so the
+  embargo is a gap of `embargo_sessions` market sessions **before** the test start. Section 4 said "after";
+  that was an error, since nothing after the test window is ever trained on.
+- Tests: `test_ml_contracts.py` (35) and `test_ml_splits.py` (16).
+- Mutation check: 28 mutations, all caught.
+  - One first survived: the split-kind check, because `random` was refused for another reason. The test now
+    matches the message.
+  - Four are stopped by a second defence in the code rather than the first assertion:
+    - the fold guard after the cutoff filter;
+    - the date-type check (comparing a datetime raises);
+    - JSON `allow_nan=False` behind the finite-float check;
+    - the minimum-training-rows check.

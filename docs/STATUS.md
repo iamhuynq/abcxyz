@@ -242,7 +242,7 @@ Registry). Summary:
       regimes and costs code), so data built by other code is refused;
   - next: PR #11, the point-in-time dataset builder.
 - PR #10 (ML foundation) merged into `main` (`3bbbda5`).
-- PR #11, the ML dataset builder (branch `ml-dataset-builder`, open, not merged; plan and results in `ml-plan.md`):
+- PR #11, the ML dataset builder (plan and results in `ml-plan.md`):
   - `ml/dataset.py`: read-only and provenance-checked;
   - per-symbol label intervals reproduce the stored labels;
   - 8 ordered exclusion reasons with reconciled counts;
@@ -252,8 +252,16 @@ Registry). Summary:
   - review rounds 1 to 3 addressed: fingerprint bound to content, period crossing from the interval, exact NaT
     handling, and a publish lock on `fcntl.flock` (the kernel frees it when the holder dies; the lock file is
     never deleted);
-  - 689 tests pass; 25 dataset mutations, all caught;
-  - next: PR #12, the baseline models.
+  - 689 tests pass; 25 dataset mutations, all caught.
+- PR #11 merged into `main` (`f06945b`).
+- PR #12, ML baseline models (branch `ml-baseline-models`, open, not merged; plan and result in `ml-plan.md`):
+  - `ModelSpec`; `mean` (reference only), `ridge` (numpy), `elasticnet` (statsmodels); no new dependency;
+  - `fit_model` / `predict_model` on explicit row positions of one verified dataset; labels never read to predict;
+  - JSON model artifacts (no pickle) with a recomputed `model_id`; shared atomic publisher `ml/publish.py`;
+  - review fixes: a metadata contract checked whenever a trained model is built or used, approved fitted model
+    names, `model_code_hash` scope, exact `float64` feature and label columns, an immutable fitted state;
+  - 787 tests pass; 69 mutations, all caught;
+  - next: PR #13, the walk-forward runner.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

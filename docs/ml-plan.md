@@ -484,3 +484,16 @@ Done as planned. Full suite: 649 passed (646 before).
   - A build row with another `code_hash` is refused.
   - `factors.py` (where `build_factors` lives) and every build SQL file are in `feature_build_files()`.
 - **Mutation check.** 60 mutations (55 earlier, four re-anchored, and 5 new), all caught.
+
+### PR #10 fifth review point: result (2026-11-12)
+
+An empty build provenance value is refused, never replaced.
+- `build_source_versions` refuses NULL, non-string, empty and blank values in all six metadata fields
+  (`factor_params`, `regime_params`, `factors_version`, `regimes_version`, `feature_set_version`, `code_hash`).
+- The version helpers substitute the current value only when the argument is omitted (`None`); an explicit
+  empty string raises.
+- Tests:
+  - 12 parametrized cases: each field set to `''` and `'   '`;
+  - explicit empty arguments to the helpers.
+- Both mutations are caught: checking only `None` in builds, and dropping the empty-value check in the helpers.
+  The full suite has 662 passing tests.

@@ -166,3 +166,25 @@ def test_the_build_code_hash_covers_the_factor_implementation_and_every_build_sq
     assert Path(inspect.getsourcefile(factors.build_factors)).name == "factors.py" and "factors.py" in files
     assert {"regimes.py", "build.py", "backtest/costs.py"} <= set(files)
     assert {f"sql/{name}" for name, _ in sql_files()} <= set(files)
+
+
+@pytest.mark.parametrize("column", ["code_hash", "factors_version", "regimes_version", "feature_set_version",
+                                    "factor_params", "regime_params"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_provenance_is_refused_never_replaced_by_the_current_version(warehouse, tmp_path, column, value):
+    path = tmp_path / "r.duckdb"
+    con, bid = _build(warehouse, path)
+    con.close()
+    with duckdb.connect(str(path)) as rw:
+        rw.execute(f"UPDATE feature_builds SET {column} = ?", [value])
+    with duckdb.connect(str(path), read_only=True) as con:
+        with pytest.raises(ContractError, match=f"no .*{column}"):
+            build_source_versions(con, bid)
+
+
+def test_version_helpers_refuse_explicit_empty_values():
+    for call in (lambda: allowlist.features_source_version(""), lambda: allowlist.factor_source_version(code=""),
+                 lambda: allowlist.factor_source_version(definitions=""), lambda: allowlist.regime_source_version(code=" "),
+                 lambda: allowlist.regime_source_version(definitions="")):
+        with pytest.raises(ValueError, match="empty or invalid provenance"):
+            call()

@@ -231,7 +231,7 @@ Registry). Summary:
   - the research cutoff 2023-12-31 is enforced on every date and label end;
   - one primary test per ML experiment counts in the global FDR family;
   - no model, no data written, no engine change (only an additive `regimes.version()`);
-  - 649 tests pass; 60 mutations, all caught. Four review rounds:
+  - 662 tests pass; 62 mutations, all caught. Five review rounds (the fifth: empty provenance values are refused):
     - first: immutable specs, a pinned baseline, the split covering the dataset period, strict purge;
     - second: a canonical regime version including `TERCILE_DIMENSIONS`; an ML factor source version that
       includes every `FactorParams` field; `check_fold` validating the fold boundaries itself;

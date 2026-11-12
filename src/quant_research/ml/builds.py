@@ -36,7 +36,9 @@ def build_source_versions(con: duckdb.DuckDBPyConnection, build_id: str, schema:
     if row is None:
         raise ContractError(f"no feature build {build_id}")
     factor_params, regime_params, factors_v, regimes_v, feature_set, code = row
-    missing = [name for name, v in zip((*META, "feature_set_version", "code_hash"), row) if v is None]
+    # NULL, a non-string or an empty / blank string is unknown provenance: fail closed, never fall back to the current
+    missing = [name for name, v in zip((*META, "feature_set_version", "code_hash"), row)
+               if not isinstance(v, str) or not v.strip()]
     if missing:
         raise ContractError(f"feature build {build_id} has no {', '.join(missing)}: its configuration is unknown "
                             "(built before 2026-11-12); rebuild with `quant build`")

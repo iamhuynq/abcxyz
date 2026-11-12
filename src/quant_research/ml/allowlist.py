@@ -48,9 +48,19 @@ EXCLUDED: dict[str, str] = {
 # effective version uses its stored feature_builds.code_hash (ml/builds.py). Coarse on purpose: any change to the
 # build code needs a rebuild before ML accepts the data.
 
+def _given(value: str | None, current) -> str:
+    """The supplied value; the current one only when the argument is omitted (None). An empty string is refused,
+    never replaced by the current version."""
+    if value is None:
+        return current()
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"empty or invalid provenance value {value!r}")
+    return value
+
+
 def features_source_version(code: str | None = None) -> str:
     """The version of stock_features: the feature set and the build code."""
-    return f"{FEATURE_SET_VERSION}@{code or feature_build_hash()}"
+    return f"{FEATURE_SET_VERSION}@{_given(code, feature_build_hash)}"
 
 
 def factor_source_version(params=None, definitions: str | None = None, code: str | None = None) -> str:
@@ -60,7 +70,7 @@ def factor_source_version(params=None, definitions: str | None = None, code: str
     is left unchanged: recorded interaction runs store it."""
     from quant_research.ml.canonical import digest
     params = factors.FactorParams() if params is None else params
-    return f"{factors.FACTOR_SET}:{definitions or factors.version()}:{digest(params)[:8]}@{code or feature_build_hash()}"
+    return f"{factors.FACTOR_SET}:{_given(definitions, factors.version)}:{digest(params)[:8]}@{_given(code, feature_build_hash)}"
 
 
 def regime_source_version(params=None, definitions: str | None = None, code: str | None = None) -> str:
@@ -68,7 +78,7 @@ def regime_source_version(params=None, definitions: str | None = None, code: str
     field and the build code; defaults as for factor_source_version."""
     from quant_research.ml.canonical import digest
     params = regimes.RegimeParams() if params is None else params
-    return f"{definitions or regimes.version()}:{digest(params)[:8]}@{code or feature_build_hash()}"
+    return f"{_given(definitions, regimes.version)}:{digest(params)[:8]}@{_given(code, feature_build_hash)}"
 
 
 def source_version(table: str) -> str:

@@ -13,8 +13,8 @@ from quant_research import factors, regimes
 from quant_research.build import FEATURE_SET_VERSION
 from quant_research.ml import allowlist
 from quant_research.ml.canonical import CONTRACT, HashError, canonical, digest
-from quant_research.ml.contracts import (RESEARCH_END, ContractError, DatasetSpec, ExperimentSpec, FeatureSpec,
-                                         LabelSpec, SplitSpec)
+from quant_research.ml.contracts import (RESEARCH_END, BaselineSpec, ContractError, DatasetSpec, ExperimentSpec,
+                                         FeatureSpec, LabelSpec, SplitSpec)
 from quant_research.ml.keys import check_point_in_time, check_unique
 
 F = FeatureSpec.current
@@ -27,12 +27,13 @@ def _dataset(**over) -> DatasetSpec:
     return DatasetSpec(**{**base, **over})
 
 
-SPLIT = SplitSpec("expanding", 500, 60, 60, 10, date(2023, 12, 29))
+SPLIT = SplitSpec("expanding", 500, 60, 60, 10, date(2010, 1, 4), date(2023, 12, 29))
 
 
 def _experiment(**over) -> ExperimentSpec:
     base = dict(hypothesis="ridge on f1 factors adds rank IC over order_flow", dataset=_dataset(), split=SPLIT,
-                model="ridge", seed=0, baseline="order_flow", primary_test="incremental_rank_ic_newey_west",
+                model="ridge", seed=0, baseline=BaselineSpec.current("order_flow"),
+                primary_test="incremental_rank_ic_newey_west",
                 params={"alpha": 1.0})
     return ExperimentSpec(**{**base, **over})
 
@@ -41,7 +42,11 @@ def test_allowlisted_features_are_accepted_at_their_current_version():
     assert F("stock_features", "return_5d").source_version == FEATURE_SET_VERSION
     assert F("stock_factors", "momentum_12_1.z").source_version == f"{factors.FACTOR_SET}:{factors.version()}"
     assert F("market_regimes", "risk").source_version == regimes.version()
-    assert len(allowlist.STOCK_FACTORS) == 27 and set(allowlist.MARKET_REGIMES) == set(regimes.DIMENSIONS)
+    assert set(allowlist.STOCK_FACTORS) == {f"{f}.{field}" for f in ("liquidity", "momentum_12_1", "momentum_1m",
+                                                                        "reversal_1w", "volatility", "beta", "order_flow",
+                                                                        "foreign_flow", "volume_surge")
+                                            for field in ("rank_pct", "z", "z_industry")}
+    assert set(allowlist.MARKET_REGIMES) == {"direction", "volatility", "liquidity", "breadth", "foreign", "risk"}
 
 
 def test_allowlist_is_the_reference_checked_feature_set():
@@ -130,9 +135,11 @@ def test_split_rules_have_no_shuffle():
 def test_experiment_needs_every_provenance_field():
     e = _experiment()
     assert len(e.experiment_id) == 16
-    for bad in (dict(hypothesis=" "), dict(model="xgboost"), dict(seed=-1), dict(baseline="value"),
-                dict(primary_test="best_of_grid"), dict(params={"Alpha": 1.0}), dict(params={"alpha": float("nan")})):
-        with pytest.raises((ContractError, HashError)):
+    for bad in (dict(hypothesis=" "), dict(model="xgboost"), dict(seed=-1), dict(baseline="order_flow"),
+                dict(primary_test="best_of_grid"), dict(params={"Alpha": 1.0}), dict(params={"alpha": float("nan")}),
+                dict(params={"alpha": object()}), dict(hypothesis=None), dict(seed=1.5), dict(seed=True),
+                dict(model=3), dict(params=[("alpha", 1)])):
+        with pytest.raises(ContractError):
             _experiment(**bad)
 
 
@@ -149,10 +156,11 @@ def test_hash_is_canonical_and_versioned():
 
 
 @pytest.mark.parametrize("change", [
-    dict(hypothesis="another hypothesis"), dict(model="elasticnet"), dict(seed=1), dict(baseline="liquidity"),
+    dict(hypothesis="another hypothesis"), dict(model="elasticnet"), dict(seed=1),
+    dict(baseline=BaselineSpec.current("liquidity")), dict(baseline=BaselineSpec.current("order_flow", "z")),
     dict(params={"alpha": 2.0}), dict(split=replace(SPLIT, embargo_sessions=11)),
     dict(split=replace(SPLIT, test_sessions=61)), dict(dataset=_dataset(label=LabelSpec("fwd_ret_exec_5d", 5))),
-    dict(dataset=_dataset(period_start=date(2011, 1, 4))),
+    dict(dataset=_dataset(period_start=date(2011, 1, 4)), split=replace(SPLIT, first_date=date(2011, 1, 4))),
     dict(dataset=_dataset(features=(F("stock_features", "return_5d"),))),
 ])
 def test_every_meaningful_field_changes_the_experiment_id(change):
@@ -187,3 +195,58 @@ def test_duplicate_keys_and_future_feature_rows_are_refused():
         check_point_in_time(late)
     with pytest.raises(ContractError, match="undated"):
         check_point_in_time(df.assign(feature_date=[None, date(2020, 1, 2), date(2020, 1, 3)]))
+
+
+def test_specs_are_deeply_immutable_against_caller_objects():
+    params = {"alpha": 1.0, "grid": [1, 2], "nested": {"l1": [0.1]}}
+    e = _experiment(params=params)
+    before = e.experiment_id
+    params["alpha"] = 100.0
+    params["grid"].append(3)
+    params["nested"]["l1"].append(0.2)
+    assert e.experiment_id == before and e.params["grid"] == (1, 2) and e.params["nested"]["l1"] == (0.1,)
+    with pytest.raises(TypeError):
+        e.params["alpha"] = 2.0                                   # the spec's own params are read-only
+    with pytest.raises(TypeError):
+        e.params["nested"]["l1"] = ()
+    feats = [F("stock_features", "gap"), F("stock_features", "return_5d")]
+    d = _dataset(features=feats)
+    fp = d.fingerprint
+    feats.pop()
+    assert d.fingerprint == fp and isinstance(d.features, tuple) and len(d.features) == 2
+    with pytest.raises(ContractError, match="FeatureSpec"):
+        _dataset(features=("stock_features.gap",))
+
+
+def test_baseline_is_version_pinned(monkeypatch):
+    b = BaselineSpec.current("order_flow")
+    assert b.source_version == f"{factors.FACTOR_SET}:{factors.version()}" and b.field == "rank_pct"
+    with pytest.raises(ContractError, match="factor definitions changed"):
+        BaselineSpec("order_flow", "f1:00000000")
+    with pytest.raises(ContractError, match="not a Factor Engine factor"):
+        BaselineSpec.current("value")
+    with pytest.raises(ContractError, match="not a factor score"):
+        BaselineSpec.current("order_flow", "value")
+    e = _experiment()
+    monkeypatch.setattr(factors, "version", lambda: "ffffffff")     # the factor definitions change
+    changed = _experiment(baseline=BaselineSpec.current("order_flow"))
+    assert changed.baseline.source_version != e.baseline.source_version
+    assert changed.experiment_id != e.experiment_id
+
+
+def test_split_must_cover_the_dataset_period_exactly():
+    for split in (replace(SPLIT, last_date=date(2015, 1, 5)), replace(SPLIT, first_date=date(2011, 1, 4)),
+                  replace(SPLIT, first_date=date(2009, 1, 5))):
+        with pytest.raises(ContractError, match="must be the same period"):
+            _experiment(split=split)
+    with pytest.raises(ContractError, match="ordered"):
+        replace(SPLIT, first_date=date(2024 - 10, 1, 5), last_date=date(2013, 1, 4))
+
+
+def test_wrong_types_raise_contract_errors():
+    for bad in (lambda: FeatureSpec(None, "gap", "v2"), lambda: LabelSpec(5, 5), lambda: LabelSpec("fwd_ret_exec_5d", "5"),
+                lambda: replace(SPLIT, kind=None), lambda: replace(SPLIT, test_sessions="60"),
+                lambda: replace(SPLIT, train_min_sessions=True), lambda: replace(SPLIT, embargo_sessions=1.0),
+                lambda: _dataset(universe=1), lambda: _dataset(label="fwd_ret_exec_10d")):
+        with pytest.raises(ContractError):
+            bad()

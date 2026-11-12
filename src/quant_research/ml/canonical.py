@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from datetime import date, datetime
 
 CONTRACT = "ml/1"
@@ -32,7 +33,7 @@ def normalize(x):
         return x.isoformat()
     if isinstance(x, (list, tuple)):
         return [normalize(v) for v in x]
-    if isinstance(x, dict):
+    if isinstance(x, Mapping):                   # dict, or the read-only mapping of a frozen spec
         if not all(isinstance(k, str) for k in x):
             raise HashError("dictionary keys must be strings")
         return {k: normalize(v) for k, v in x.items()}

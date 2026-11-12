@@ -230,3 +230,69 @@ Branch `ml-foundation`. Full suite: 616 passed (565 before). The only change out
     - the date-type check (comparing a datetime raises);
     - JSON `allow_nan=False` behind the finite-float check;
     - the minimum-training-rows check.
+
+## PR #10 review (external, 2026-11-12, head `781d6be`): assessment and plan
+
+All four findings were reproduced on the branch:
+- mutating the caller's `params` dict changes `experiment_id`;
+- mutating the `features` list passed in changes the dataset fingerprint (it is stored as a list);
+- `hypothesis=None` raises `AttributeError`, not `ContractError`;
+- a split ending in 2015 is accepted for a dataset that ends in 2023.
+
+| Point | Assessment | Action |
+|---|---|---|
+| P1 specs are not deeply immutable | Valid | At construction, `params` becomes an immutable canonical form: nested dicts are converted to a read-only mapping (`MappingProxyType` of normalized values), lists to tuples, and unsupported types are refused. `DatasetSpec.features` is stored as a tuple of `FeatureSpec`, and anything else is refused. Tests: mutating the caller's dict or list (nested too) changes neither the spec nor its id, and the spec's own `params` cannot be modified. |
+| P1 the Factor Engine baseline is not pinned | Valid | `BaselineSpec(factor, field = rank_pct, source_version)`, validated like a feature: the factor must exist and the version must be the current `f1:<factors.version()>`. `ExperimentSpec.baseline` is a `BaselineSpec`, so the id covers the baseline version. Test: a different baseline version changes the id, and a stale version is refused. |
+| P2 dataset period and split boundaries are not cross-validated | Valid | `SplitSpec` gets a `first_date`. `ExperimentSpec` requires the split to cover the dataset exactly: `split.first_date == dataset.period_start` and `split.last_date == dataset.period_end` (no undeclared subset). `folds` uses only sessions in `[first_date, last_date]`. Tests: a split ending before the dataset end is refused, and a calendar starting before the dataset start yields no earlier session. |
+| P2 purge and embargo boundaries | Valid as explicitness; no defect | Contract stated in the docstrings and section 7: training labels must end **strictly before** `embargo_start`, a market session `embargo_sessions` before the test start. Intervals come per symbol from the dataset builder, never from a market row count. `purge` also requires `label_start` and raises on an interval that does not start after its decision date, like `check_fold`. Boundary tests: a label ending the session before `embargo_start` is kept; one ending on it, inside the gap, or overlapping the test window is purged; an invalid interval raises. |
+| 5.3 allowlist completeness | Valid | The test compares the full expected factor-column set (all 27 names), not only the count. |
+| 5.4 type errors | Valid | Explicit type checks: every string field, integer field and date field raises `ContractError` on a wrong type. Test with `None` and numbers. |
+| 5.1 / 5.2 FDR registration and the Newey-West test specification | Agreed; not in PR #10 | Recorded as requirements for PR #13 (section 8 below). |
+
+## 8. Requirements carried to later PRs (from the PR #10 review)
+
+- **FDR (PR #13).**
+  - Exactly one primary test per experiment and per configuration, with a stable label.
+  - The run starts, and the test is logged, before its result is read.
+  - Failed or unfavourable runs stay in the run lifecycle (never deleted).
+- **Primary-test specification, before any decision uses it.**
+  - Rank IC per date (Spearman with tie handling, as the decile scan).
+  - The incremental IC is the model IC minus the baseline IC on the same dates and rows.
+  - Newey-West lag = horizon - 1, as `mean_test` elsewhere.
+  - A minimum of 30 stocks per date and 60 valid dates per fold.
+  - Dates with too few stocks are dropped and counted.
+  - The baseline is pinned by `BaselineSpec`.
+- **Dataset builder (PR #11).**
+  - Per-symbol label start and end.
+  - Allowlist and source versions only.
+  - NULL labels excluded by an explicit, counted rule.
+  - The fingerprint includes the data identity (warehouse SHA, feature build).
+
+### PR #10 review fixes: result (2026-11-12)
+
+Done as planned. Full suite: 624 passed (616 before).
+
+- **Deep immutability.**
+  - `ExperimentSpec.params` is frozen at construction: read-only mappings, tuples, and finite scalars or dates
+    only.
+  - `DatasetSpec.features` is copied into a tuple of `FeatureSpec`.
+  - Tests: mutating the caller's dict or list (nested too) changes neither the spec nor its id; the spec's own
+    params raise on assignment.
+- **`BaselineSpec(factor, source_version, field)`.** The factor version is pinned to the current
+  `f1:<factors.version()>`; a stale version is refused. A changed factor definition (simulated by patching
+  `factors.version`) changes the experiment id.
+- **`SplitSpec.first_date`.** The split must cover the dataset period exactly, and `folds` uses only sessions in
+  `[first_date, last_date]`.
+- **Purge contract.** Labels must end strictly before `embargo_start`. `purge` requires the label interval and
+  raises on an invalid one.
+  - Boundary tests: the session before the gap is kept; on `embargo_start`, inside the gap and in the test
+    window are purged.
+  - A row decided before a rolling training window is dropped.
+- **Types.** Explicit type checks: `None`, numbers for strings, `True` or `1.0` for ints, and strings for specs
+  raise `ContractError`.
+- **Allowlist test.** It compares all 27 factor columns and all 6 regime states by name.
+- **Mutation check.** 38 mutations (28 updated, 10 new), all caught. The three immutability mutations are caught
+  by the immutability test on its own. Two first-pass findings got fixes:
+  - the training-window purge had no row decided before a rolling window, so a test was added;
+  - the "bool as int" mutation first disabled every type check instead of only the bool clause, so it was
+    rewritten.

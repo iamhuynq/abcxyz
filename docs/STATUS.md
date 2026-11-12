@@ -231,7 +231,8 @@ Registry). Summary:
   - the research cutoff 2023-12-31 is enforced on every date and label end;
   - one primary test per ML experiment counts in the global FDR family;
   - no model, no data written, no engine change (only an additive `regimes.version()`);
-  - 616 tests pass; 28 mutations, all caught;
+  - 624 tests pass; 38 mutations, all caught (after the PR #10 review fixes: immutable specs, a pinned
+    baseline, the split covering the dataset period, strict purge);
   - next: PR #11, the point-in-time dataset builder.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate

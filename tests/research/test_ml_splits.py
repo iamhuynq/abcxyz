@@ -20,7 +20,7 @@ def _weekdays(start: date, n: int, skip: tuple[date, ...] = ()) -> list[date]:
 
 
 CAL = _weekdays(date(2023, 1, 2), 30, skip=(date(2023, 1, 23), date(2023, 1, 24)))   # a two-day market holiday
-SPLIT = SplitSpec("expanding", 10, 5, 5, 2, date(2023, 12, 29))
+SPLIT = SplitSpec("expanding", 10, 5, 5, 2, date(2023, 1, 2), date(2023, 12, 29))
 
 
 def test_folds_are_deterministic_chronological_and_complete():
@@ -59,7 +59,8 @@ def test_purge_uses_the_actual_label_end_not_a_row_count():
     rows = _rows([CAL[3], CAL[3], CAL[5], CAL[6], CAL[9]], [CAL[5], CAL[9], CAL[7], CAL[8], CAL[11]])
     keep = purge(rows, f)
     assert keep.tolist() == [True, False, True, False, False]
-    assert purge(rows.assign(date=[CAL[12]] * 5), f).tolist() == [False] * 5   # decided inside the test window
+    inside = _rows([CAL[12]] * 2, [CAL[14]] * 2)
+    assert purge(inside, f).tolist() == [False, False]                          # decided inside the test window
 
 
 def _fold(test_end: date = date(2023, 12, 29)) -> Fold:
@@ -88,7 +89,7 @@ def test_a_valid_fold_passes_and_the_cutoff_day_itself_is_allowed():
     (TRAIN, _frame([date(2023, 11, 29)], [date(2023, 11, 30)], [date(2023, 12, 5)]), _fold(), "outside the test"),
     (_frame([date(2023, 11, 1)], [date(2023, 11, 2)], [date(2023, 11, 28)]), TEST, _fold(), "embargo gap"),
     (_frame([date(2023, 11, 1)], [date(2023, 11, 1)], [date(2023, 11, 3)]), TEST, _fold(), "does not start after"),
-    (_frame([date(2023, 11, 1)], [date(2023, 11, 2)], [None]), TEST, _fold(), "without label_end"),
+    (_frame([date(2023, 11, 1)], [date(2023, 11, 2)], [None]), TEST, _fold(), "without a label interval"),
     (TRAIN, TEST.iloc[0:0], _fold(), "no test rows"),
 ])
 def test_check_fold_refuses_every_leak(train, test, fold, why):
@@ -104,3 +105,30 @@ def test_check_fold_refuses_too_little_training_data():
 def test_session_offset_counts_market_sessions():
     assert session_offset(CAL, CAL[14], 1) == CAL[15] and CAL[15] - CAL[14] == timedelta(days=5)   # the holiday
     assert session_offset(CAL, CAL[0], 3) == CAL[3] and session_offset(CAL, CAL[-1], 1) is None
+
+
+def test_purge_boundaries_are_strict():
+    f = folds(CAL, SPLIT)[1]                     # test CAL[15]..CAL[19]; embargo gap starts at CAL[13]
+    assert (f.embargo_start, f.test_start) == (CAL[13], CAL[15])
+    rows = _rows([CAL[9]] * 4, [CAL[12], CAL[13], CAL[14], CAL[16]])
+    # ends the session before the gap: kept; on embargo_start, inside the gap, inside the test window: purged
+    assert purge(rows, f).tolist() == [True, False, False, False]
+    with pytest.raises(ContractError, match="does not start after"):
+        purge(rows.assign(label_start=CAL[9]), f)                               # starts on its decision date
+    with pytest.raises(ContractError, match="does not start after"):
+        purge(rows.assign(label_end=CAL[9]), f)                                 # ends before it starts
+    with pytest.raises(ContractError, match="without a label interval"):
+        purge(rows.assign(label_end=None), f)
+
+
+def test_folds_never_use_sessions_before_the_dataset_start():
+    split = replace(SPLIT, first_date=CAL[5])
+    fs = folds(CAL, split)
+    assert fs[0].train_start == CAL[5] and fs[0].test_start == CAL[15]
+    assert min(f.train_start for f in folds([date(2022, 12, 1), *CAL], split)) == CAL[5]
+
+
+def test_purge_drops_rows_decided_before_a_rolling_training_window():
+    f = folds(CAL, replace(SPLIT, kind="rolling", train_sessions=10))[1]       # training CAL[5]..CAL[14]
+    rows = _rows([CAL[2], CAL[6]], [CAL[4], CAL[8]])
+    assert f.train_start == CAL[5] and purge(rows, f).tolist() == [False, True]

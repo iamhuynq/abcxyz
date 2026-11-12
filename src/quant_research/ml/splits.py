@@ -34,9 +34,10 @@ def _calendar(calendar) -> list[date]:
 
 
 def folds(calendar, split: SplitSpec) -> list[Fold]:
-    """Deterministic folds over the market sessions up to split.last_date (never past the research cutoff). Only
-    complete test windows are produced; too few sessions for one fold is an error."""
-    cal = [d for d in _calendar(calendar) if d <= split.last_date]
+    """Deterministic folds over the market sessions in [split.first_date, split.last_date] (the dataset period,
+    never past the research cutoff). Only complete test windows are produced; too few sessions for one fold is an
+    error."""
+    cal = [d for d in _calendar(calendar) if split.first_date <= d <= split.last_date]
     out, k = [], 0
     while True:
         start = split.train_min_sessions + k * split.step_sessions
@@ -57,26 +58,35 @@ def folds(calendar, split: SplitSpec) -> list[Fold]:
     return out
 
 
+def _intervals(df: pd.DataFrame, name: str) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """(date, label_start, label_end) as dates. Every row needs a label interval that starts after its decision
+    date: the dataset builder supplies it per symbol (the symbol's own sessions) and excludes NULL labels."""
+    d = pd.to_datetime(df["date"]).dt.date
+    start, end = pd.to_datetime(df["label_start"]), pd.to_datetime(df["label_end"])
+    if start.isna().any() or end.isna().any():
+        raise ContractError(f"{name}: {int((start.isna() | end.isna()).sum())} rows without a label interval")
+    start, end = start.dt.date, end.dt.date
+    if ((start <= d) | (end < start)).any():
+        raise ContractError(f"{name}: a label interval does not start after its decision date")
+    return d, start, end
+
+
 def purge(train: pd.DataFrame, fold: Fold) -> pd.Series:
-    """Rows of `train` (columns date, label_end) to keep: decided inside the training window, label ending before
-    the embargo gap."""
-    d, end = pd.to_datetime(train["date"]).dt.date, pd.to_datetime(train["label_end"]).dt.date
-    return (d >= fold.train_start) & (d <= fold.train_end) & end.notna() & (end < fold.embargo_start)
+    """Rows of `train` (columns date, label_start, label_end) to keep: decided inside the training window, with a
+    label that ends **strictly before** fold.embargo_start (the session `embargo_sessions` before the test start).
+    A label ending on embargo_start, inside the gap, or in the test window is purged; an invalid interval raises."""
+    d, _start, end = _intervals(train, "train")
+    return (d >= fold.train_start) & (d <= fold.train_end) & (end < fold.embargo_start)
 
 
 def check_fold(train: pd.DataFrame, test: pd.DataFrame, fold: Fold, split: SplitSpec) -> None:
     """Raise unless the fold is leakage-safe. Both frames have columns date, label_start, label_end."""
     for name, df in (("train", train), ("test", test)):
-        for col in ("date", "label_start", "label_end"):
-            values = pd.to_datetime(df[col])
-            if values.isna().any():
-                raise ContractError(f"{name}: {int(values.isna().sum())} rows without {col}")
-            if (values.dt.date > RESEARCH_END).any():
+        if pd.to_datetime(df["date"]).isna().any():
+            raise ContractError(f"{name}: rows without date")
+        for col, values in zip(("date", "label_start", "label_end"), _intervals(df, name)):
+            if (values > RESEARCH_END).any():
                 raise ContractError(f"{name}: {col} after the research cutoff {RESEARCH_END}")
-        d = pd.to_datetime(df["date"]).dt.date
-        start, end = pd.to_datetime(df["label_start"]).dt.date, pd.to_datetime(df["label_end"]).dt.date
-        if ((start <= d) | (end < start)).any():
-            raise ContractError(f"{name}: a label interval does not start after its decision date")
     if fold.test_end > RESEARCH_END:
         raise ContractError(f"fold {fold.index} ends after the research cutoff {RESEARCH_END}")
     td = pd.to_datetime(train["date"]).dt.date

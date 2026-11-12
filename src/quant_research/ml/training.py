@@ -166,9 +166,9 @@ def open_dataset(ds) -> Dataset:
             or list(data.columns) != cols or set(features) != set(versions) or len(set(cols)) != len(cols)):
         raise ContractError(f"dataset columns {list(data.columns)} are not date, symbol, the declared features, "
                             f"the label {label!r}, label_start, label_end")
-    for c in (*features, label):
-        if data[c].dtype.kind != "f":
-            raise ContractError(f"column {c} has dtype {data[c].dtype}, not float: nothing is coerced")
+    for c in (*features, label):                     # exact: a narrower float has already lost precision
+        if data[c].dtype != np.dtype("float64"):
+            raise ContractError(f"column {c} has dtype {data[c].dtype}, expected float64: nothing is coerced")
     check_unique(data)
     keys = pd.MultiIndex.from_arrays([pd.to_datetime(data["date"]), data["symbol"]])
     if not keys.is_monotonic_increasing:

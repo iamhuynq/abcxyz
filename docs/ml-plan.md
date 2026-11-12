@@ -1069,3 +1069,28 @@ Full suite: 786 passed (754 before). ML model tests: `test_ml_models.py` 17, `te
 - **Mutation check.** 66 mutations, all caught: the 46 earlier ones (re-anchored) and 20 new ones, one per
   metadata rule plus the structure and model-name checks. Two survived the first run (the structure re-check in
   `check_trained`, the `model_id` format) and were caught after two tests were added.
+
+## PR #12 second review (external, 2026-11-12, head `fa0a111`): assessment and plan
+
+One P2 point; the earlier findings are recorded as addressed or accepted follow-ups.
+
+- **`open_dataset` accepts any float dtype, then converts to float64: confirmed.** A resealed (self-consistent)
+  dataset with a `float32` feature column, or a `float32` label, trains today. The dataset builder always
+  produces `float64`, so this only matters for a dataset produced some other way. It still breaks the "nothing
+  is coerced" contract, because `float32` precision is already lost and widening hides that.
+- **Plan.**
+  - Require exactly `float64` for every feature column and the label in `open_dataset`, before any conversion,
+    with the message `column <c> has dtype <d>, expected float64`.
+  - Tests on resealed datasets: a `float32` feature, a `float32` label and a `float16` feature are refused; the
+    existing `object` dtype case stays.
+  - Update the mutation for this check (`kind == "f"` instead of exact `float64` must be caught).
+
+### PR #12 second review fix: result (2026-11-12)
+
+Full suite: 786 passed (the new cases extend an existing test).
+
+- `open_dataset` requires exactly `float64` for every feature and the label, before any conversion.
+- Resealed datasets with a `float32` feature, a `float16` feature, a `float32` label or an `object` feature are
+  refused with `expected float64`.
+- Mutation check: 67 mutations, all caught. The dtype mutation was re-anchored, and a new one restoring the old
+  `kind == "f"` rule is caught.

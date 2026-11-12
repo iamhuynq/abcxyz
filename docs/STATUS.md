@@ -259,8 +259,8 @@ Registry). Summary:
   - `fit_model` / `predict_model` on explicit row positions of one verified dataset; labels never read to predict;
   - JSON model artifacts (no pickle) with a recomputed `model_id`; shared atomic publisher `ml/publish.py`;
   - review fixes: a metadata contract checked whenever a trained model is built or used, approved fitted model
-    names, `model_code_hash` scope;
-  - 786 tests pass; 66 mutations, all caught;
+    names, `model_code_hash` scope, exact `float64` feature and label columns;
+  - 786 tests pass; 67 mutations, all caught;
   - next: PR #13, the walk-forward runner.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate

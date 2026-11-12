@@ -146,8 +146,9 @@ def test_self_consistent_but_malformed_datasets_are_refused(ds):
     own = training.fit_model(reordered, train, RIDGE)
     assert [f for f, _v in own.metadata["features"]] == swapped[2:5]
     assert own.fitted.coef == pytest.approx([t.fitted.coef[i] for i in (1, 0, 2)], rel=1e-12)   # relabelled
-    with pytest.raises(ContractError, match="not float"):
-        training.fit_model(reseal(ds, d.astype({cols[2]: object})), train, RIDGE)
+    for col, dtype in ((cols[2], object), (cols[2], np.float32), (cols[3], np.float16), ("fwd_ret_exec_5d", np.float32)):
+        with pytest.raises(ContractError, match="expected float64"):
+            training.fit_model(reseal(ds, d.astype({col: dtype})), train, RIDGE)
     with pytest.raises(ContractError, match=r"not in \(date, symbol\) order"):
         training.fit_model(reseal(ds, d.iloc[::-1].reset_index(drop=True)), train, RIDGE)
     with pytest.raises(ContractError, match="share a key"):

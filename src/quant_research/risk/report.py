@@ -84,5 +84,53 @@ def render(store: ResultsStore, run_id: str) -> str:
                             ORDER BY weight DESC, symbol""", [run_id]).fetchall():
         lines.append(f"| {r[0]} | {_v(r[1], True)} | {r[2] or '-'} | {r[3] or '-'} | {_v(r[4])} | {_v(r[5], True)} | "
                      f"{_v(r[6])} | {_v(r[7])} | {'-' if r[8] is None else r[8]} | {r[9] or ''} |")
+    lines += _reconciliation(con, run_id) + _stress(con, run_id)
     lines += ["", "## Definitions and limitations", ""] + [f"- {x}" for x in LIMITATIONS]
     return "\n".join(lines) + "\n"
+
+
+def _has(con, table: str) -> bool:
+    return bool(con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = ?", [table]).fetchone()[0])
+
+
+STRESS_NOTE = ("Scenarios are illustrations, not forecasts, probabilities or policy limits: each is MEASURED or "
+               "INCOMPLETE, none is summed with another, and idiosyncratic return is 0. A loss is VND lost by marking "
+               "positions down (negative: a gain); the liquidation cost is separate.")
+
+
+def _stress(con, run_id: str) -> list[str]:
+    rows = con.execute("""SELECT scenario_id, family, grp, status, valuation_loss, valuation_loss_pct, cost, cost_before,
+                                 coverage, affected, reason, notes FROM risk_stress_results WHERE run_id = ?
+                          ORDER BY seq""",
+                       [run_id]).fetchall() if _has(con, "risk_stress_results") else []
+    if not rows:
+        return ["", "## Stress scenarios", "", "Not run for this evaluation (risk model v1, or --no-stress)."]
+    scen = con.execute("SELECT params::JSON ->> '$.extra.scenarios' FROM research_runs WHERE run_id = ?",
+                       [run_id]).fetchone()
+    out = ["", "## Stress scenarios", "", f"Scenario set `{scen[0] if scen else '-'}`. {STRESS_NOTE}", "",
+           "| scenario | group | status | loss | loss % NAV | cost | cost before | coverage | affected | reason / notes |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    for sid, _fam, grp, st, loss, pct, cost, before, cov, aff, reason, notes in rows:
+        text = "; ".join(x for x in (reason, notes) if x)
+        out.append(f"| {sid} | {grp or '-'} | {st} | {_v(loss)} | {_v(pct, True)} | {_v(cost)} | {_v(before)} | "
+                   f"{_v(cov, True)} | {aff or ''} | {text} |")
+    return out
+
+
+def _reconciliation(con, run_id: str) -> list[str]:
+    if not _has(con, "risk_reconciliation"):
+        return []
+    rows = con.execute("""SELECT source_run, metric, stored, resimulated, rel_diff, within FROM risk_reconciliation
+                          WHERE run_id = ? ORDER BY metric""", [run_id]).fetchall()
+    if not rows:
+        return []
+    bad = [r[1] for r in rows if not r[5]]
+    head = ("reconciles with" if not bad else f"does NOT reconcile ({len(bad)} of {len(rows)} metrics) with")
+    out = ["", "## Re-simulation", "",
+           f"This portfolio is a re-simulation of the declared configuration with today's code and data. It {head} "
+           f"the stored run `{rows[0][0]}` (relative tolerance 1e-9, the reproducibility policy H-1). It is not the "
+           "historical run; the limits and scenarios describe the re-simulation.", "",
+           "| metric | stored | re-simulated | relative difference | within |", "|---|---|---|---|---|"]
+    out += [f"| {m} | {_v(a)} | {_v(b)} | {'-' if d is None else f'{d:.2e}'} | {'yes' if w else 'NO'} |"
+            for _src, m, a, b, d, w in rows]
+    return out

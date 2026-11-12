@@ -497,3 +497,307 @@ An empty build provenance value is refused, never replaced.
   - explicit empty arguments to the helpers.
 - Both mutations are caught: checking only `None` in builds, and dropping the empty-value check in the helpers.
   The full suite has 662 passing tests.
+
+## PR #11: dataset builder (plan, 2026-11-12)
+
+Source: the external spec "PR #11 - ML Dataset Builder" (branch `ml-dataset-builder` from `3bbbda5`).
+
+### Audit
+
+- `pyarrow` is already a dependency, so Parquet needs nothing new.
+- `stock_targets` does not expose the entry and exit dates: `d1` to `d20` are computed inside
+  `04_stock_targets.sql` and dropped.
+- The masks exist per horizon: `fwd_has_price_jump_{1,3,5,10,20}d` and `crosses_period_{1,3,5,10,20}d`, plus
+  `entry_blocked`.
+- Feature rows are dated by their decision date. There is no separate availability column: point in time comes
+  from the tested SQL, the allowlist and the source versions.
+- The real `research.duckdb` still has the old `feature_builds` schema, so ML refuses it until the next
+  `quant build`.
+
+### Decisions (to approve)
+
+1. **Label intervals without approximation and without changing the target SQL.**
+   - The builder derives `label_start` (`lead(date, 1)`) and `label_end` (`lead(date, h)`) from `daily_panel`
+     with the same window as `04_stock_targets.sql`: `PARTITION BY symbol ORDER BY date`, the symbol's own rows.
+   - A test checks, on the synthetic build, that the interval reproduces the label: `close[label_end] /
+     open[label_start] - 1 == fwd_ret_exec_{h}d`. It also checks a symbol with gaps (the dropped zero-price row)
+     and the last sessions.
+   - `stock_targets` itself is not changed; changing it would change the feature-build code hash and every
+     source version.
+2. **Exclusions are sequential**, each row under its first reason, in this order, with input = retained + sum:
+   1. missing label interval (no `h`-th session);
+   2. NULL executable label;
+   3. `entry_blocked`;
+   4. `fwd_has_price_jump_{h}d`;
+   5. `crosses_period_{h}d`, or a label end past the dataset period or the research cutoff;
+   6. outside the point-in-time universe (`ResearchParams().point_in_time_sql()`, the `DatasetSpec` universe);
+   7. a NULL required feature.
+
+   Overlapping counts are reported as diagnostics. No row is dropped any other way, and nothing is filled.
+   NULL features are excluded by rule 7, not imputed.
+3. **API.** `build_dataset(con, spec, build_id, schema="rs.") -> DatasetResult(data, metadata, fingerprint,
+   exclusions)`.
+   - `check_build` runs first.
+   - Identifiers come only from the validated specs; values are bound as parameters.
+   - `check_unique` and `check_point_in_time` (`feature_date` = the source row's date) run on the result.
+4. **Artifact (optional).** `write_dataset(result, path)` writes `<path>.parquet` and `<path>.json` (metadata)
+   atomically (temporary file, then rename). It refuses an existing path. The fingerprint covers the canonical
+   logical content (sorted rows, every value) and the provenance, not the Parquet bytes.
+5. **Fingerprint and metadata.**
+   - The spec fingerprint, ordered features with their versions, label and horizon, `build_id`, the effective
+     source versions, `code_hash`, `warehouse_sha`, `data_as_of`, row counts, exclusions and `contract: ml/1`.
+   - No wall-clock time.
+   - Empty or NULL provenance fails closed (already in `ml/builds.py`; `warehouse_sha` is added to that check).
+6. **Read-only.** Every database is opened read-only. No table, view or row is written.
+
+### Tests
+
+Tests use synthetic builds and cover the spec's list: provenance, row integrity, labels and intervals,
+exclusion accounting, and artifact behaviour. Every new test is mutation-checked.
+
+### PR #11 plan review (external, 2026-11-12): revisions
+
+**Checked in `04_stock_targets.sql` (the reviewer's blocker).**
+- `fwd_ret_exec_{h}d = lead(adj_close, h) / lead(adj_open, 1) - 1`, over `daily_panel` with
+  `PARTITION BY symbol ORDER BY date` (lines 10-12, 26, 37). The builder reads the same table and columns, so the
+  prices come from the same source.
+- `entry_blocked`, `fwd_has_price_jump_{h}d` and `crosses_period_{h}d` are separate flags (lines 48, 59, 71).
+  None of them makes the label NULL.
+- A label is NULL only when the symbol has no h-th later row. `daily_panel` drops non-positive prices, so there
+  is no other way. The masks are therefore never hidden by a NULL label. The revised order puts the known causes
+  first anyway, and a test proves that no masked row has a NULL label.
+
+**1. Interval definition (as the target SQL, which the label must reproduce).**
+- `label_start = lead(date, 1)`: the symbol's own next row after t (entry at its open).
+- `label_end = lead(date, h)`: the symbol's h-th own row after t (exit at its close). That is the (h-1)-th row
+  after `label_start`, not the h-th: `fwd_ret_exec_3d` enters at the open of t+1 and exits at the close of t+3.
+  The reviewer's wording ("h-th from `label_start`") would not reproduce the stored label.
+- The order comes from each symbol's own `daily_panel` rows, never a market-wide index.
+- If the h-th row is missing, there is no interval. That is reason 2, never inferred.
+- Test: `adj_close(label_end) / adj_open(label_start) - 1 == fwd_ret_exec_{h}d` to 1e-12, for every symbol and
+  every horizon (3, 5, 10, 20) of the synthetic build. That covers a late first trade (DEL, UPC), a row dropped
+  inside the series (STK's zero-price placeholder) and the series ends.
+
+**2. Exclusions: one status per row, first match wins, the order explicit in code.** A row is either `kept` or
+has exactly one `exclusion_reason`, assigned by an ordered tuple of named predicates evaluated in that order:
+1. `outside_universe`: fails the point-in-time universe at t (eligibility uses only data at t, so it comes first);
+2. `no_label_interval`: the symbol has no h-th later row (this is also when the label is NULL);
+3. `entry_blocked`;
+4. `price_jump_in_window`: `fwd_has_price_jump_{h}d`;
+5. `label_crosses_period`: `crosses_period_{h}d` (for a research dataset, this includes every label that starts
+   before 2023-12-31 and ends after it);
+6. `label_after_dataset_end`: `label_end` after `DatasetSpec.period_end` (within research, when the dataset
+   ends earlier);
+7. `label_null`: residual, a NULL label with an interval (expected 0; counted, never filled);
+8. `feature_null`: a required feature is NULL.
+
+The table gives the count and the share of input rows for each reason, plus `input_rows = kept_rows +
+excluded_rows`. A test proves the reconciliation and that every row has exactly one status.
+
+**3. Universe: point in time, from row data at t only.**
+- It is `ResearchParams().point_in_time_sql()`: traded at t, ADV20 at t > 1 bn, more than 20 own sessions, no
+  price jump at t, not the bad source date.
+- `daily_panel` keeps delisted stocks (459 covered, `audit pit`), so no current membership list is used.
+- Stated limitation (integrity finding E-1): exchange and industry are current values. The universe filter does
+  not use them, but industry-based features (`z_industry`) do.
+- The universe SQL text is in the `DatasetSpec` fingerprint (PR #10) and in the metadata.
+
+**4. API.** `build_dataset(con, spec, build_id, schema) -> DatasetResult`, with:
+- `data` (kept rows: keys, features in spec order, label, `label_start`, `label_end`);
+- `metadata` (read-only mapping);
+- `fingerprint`;
+- `exclusions` (ordered: reason, count, share);
+- `input_rows`, `kept_rows`, `excluded_rows`.
+
+`check_build` runs before any dataset read and checks every source the spec uses; `warehouse_sha` is added to
+the non-empty provenance check. It never runs `quant build`. A test compares the database file's hash before and
+after the call.
+
+**5. Artifact: one atomic directory.**
+- `write_dataset(result, path)` writes `data.parquet` and `metadata.json` into a temporary sibling directory,
+  verifies both, and renames the directory to `path` in one step. `path` must not exist.
+- A failure before the rename leaves no `path`, and the temporary directory is removed.
+- `read_dataset(path)` recomputes the content hash and refuses a mismatch with the metadata fingerprint.
+- Tests:
+  - the target already exists;
+  - a failure while writing the metadata;
+  - a failure before the rename (patched);
+  - a tampered value or a mismatched fingerprint is refused on read.
+
+**6. Fingerprint = canonical hash of provenance plus logical content.**
+- Provenance: contract `ml/1`, dataset schema version `dataset/1`, spec fingerprint, ordered columns with
+  feature versions, label and horizon, `build_id`, effective source versions, `code_hash`, `warehouse_sha`,
+  `data_as_of`, the ordered exclusion counts, and the row count.
+- Content: rows sorted by `(date, symbol)`, each serialized canonically (ISO dates, floats as `float.hex`, NULL
+  as null, string labels as-is) and fed into SHA-256 in column order.
+- Tests:
+  - changing one feature value, the column order, the label, the build or the warehouse SHA changes the
+    fingerprint;
+  - identical inputs give the same fingerprint, across processes as well.
+
+### PR #11: final clarifications before implementation (2026-11-12, plan approved)
+
+1. **`outside_universe` is reachable and is not a join condition.**
+   - Candidate rows are every `daily_panel` row `(date, symbol)` in the dataset period: every session from the
+     symbol's first to its last traded date, including no-trade sessions.
+   - The universe is `ResearchParams().point_in_time_sql()`, evaluated on that row's `stock_features` values at
+     t: traded at t, `adv_value_20 > 1 bn`, `session_index > 20`, no price jump at t, not 2025-07-16.
+   - A candidate fails it on a no-trade day, when illiquid, in its first 20 sessions, or on a price-jump day.
+     These cases are frequent, so the reason is real.
+   - Features are left-joined on `(date, symbol)`. A missing feature value falls under `feature_null`, never a
+     silent drop.
+   - Source and version of the universe: the SQL text, already in the `DatasetSpec` fingerprint, and the build.
+2. **`z_industry` is removed from the default allowlist.** The 9 `<factor>.z_industry` entries are removed until
+   a point-in-time industry history exists, because they use the current ICB classification. The limitation is
+   stated in `allowlist.py`, in the dataset metadata (`limitations`) and here. The allowlist test is updated
+   (18 factor entries).
+3. **Every exclusion reason is always in the metadata, in the declared order, count 0 included.** Test: a
+   dataset where some reasons do not occur still lists all 8, and the counts reconcile with the input rows.
+4. **Intervals come from the full series.** `label_start` and `label_end` are computed with `lead()` over each
+   symbol's complete `daily_panel` series (all its rows, before any period filter or exclusion), and only then
+   joined to the candidates.
+   - A test removes candidate rows (a dataset period that starts mid-series, and excluded rows) and checks that
+     the intervals of the kept rows are unchanged and still reproduce `fwd_ret_exec_{h}d`.
+
+Scope unchanged: no model training, no experiment runner.
+
+### Result, PR #11 (2026-11-12)
+
+Branch `ml-dataset-builder`. Full suite: 677 passed (662 before). No database is written, no model,
+no runner.
+
+- **`ml/dataset.py`.**
+  - `build_dataset(con, spec, build_id, schema)`:
+    - runs `check_build` first, then `build_identity` (non-empty `warehouse_sha` and `code_hash`, plus
+      `data_as_of`);
+    - candidates are every `daily_panel` row in the period;
+    - intervals are `lead(date, 1)` / `lead(date, h)` over each symbol's full series;
+    - features are left-joined from the validated specs only (factor names bound as parameters);
+    - `check_unique` and `check_point_in_time` run on the result;
+    - every row gets one status in the explicit `REASONS` order;
+    - accounting is reconciled or the call raises.
+  - `DatasetResult`: data, metadata, fingerprint, exclusions (every reason, zeros included, with its share),
+    and the row counts.
+  - Fingerprint: the canonical digest of the provenance plus `content_hash` (rows sorted by date and symbol,
+    floats as `float.hex`).
+  - `write_dataset` / `read_dataset`: one temporary directory holding `data.parquet` and `metadata.json`,
+    verified and renamed in one step. An existing path is refused, and a failure leaves nothing behind. Reading
+    refuses a content-hash or fingerprint mismatch.
+- **`z_industry` removed from the allowlist** (18 factor entries). `allowlist.LIMITATIONS` is copied into the
+  metadata.
+- **`ml/builds.build_identity`** checks the data identity of a build.
+- **Tests (`test_ml_dataset.py`, 15).**
+  - The read-only check compares the database file hash before and after.
+  - Interval and label reproduction to 1e-12, for every symbol and horizons 3/5/10/20, against each symbol's
+    own sessions. This includes a no-trade session inside UPC's series, and a dataset starting mid-series
+    (intervals unchanged).
+  - Masks never hidden by a NULL label; first match wins; `feature_null` counted; `label_after_dataset_end`.
+  - Provenance: empty `warehouse_sha`, non-approved parameters, missing build.
+  - `z_industry` and target columns refused.
+  - Fingerprint: content, order, label, warehouse SHA; stable across processes.
+  - Artifact: atomic, never overwritten, a failure while writing the metadata or before the rename leaves
+    nothing, and tampered data or metadata is refused.
+- **Mutation check.** 13 mutations, all caught. Three first survived and got tests:
+  - intervals computed from traded rows only: a no-trade session was added to the fixture;
+  - the fingerprint not checked on read: a tampered-metadata test;
+  - the dataset-end rule: a dataset ending mid-series.
+
+### PR #11 review fixes: result (2026-11-12)
+
+Full suite: 687 passed (677 before). Scope unchanged: no model, no runner.
+
+- **P1-1: fingerprint bound to content.**
+  - `dataset.fingerprint(provenance, content)` is a canonical SHA-256 over the metadata (without
+    `content_hash`) and the logical content hash. The same function is used by `build_dataset` and
+    `read_dataset`.
+  - On read, the content hash is recomputed from the data, compared with the metadata, and then used to
+    recompute the fingerprint.
+  - This is an **integrity check, not a digital signature**: it detects any change to the data, the content
+    hash, the metadata or the fingerprint, but whoever can rewrite all of them can recompute it. Authenticity
+    would need a key, which is out of scope.
+  - Tests:
+    - data and `content_hash` rewritten together with a stale fingerprint are refused, which shows the
+      content is in the fingerprint;
+    - a tampered `content_hash`, a changed metadata field and a forged fingerprint are each refused.
+- **P1-2: period crossing from the interval itself.**
+  - The builder takes `decision_period` and `lead(period, h)` (the period of `label_end`) from
+    `daily_panel`'s own period column, over the same full series.
+  - `label_crosses_period` = the two periods differ, or `label_end` > 2023-12-31. `stock_targets`'s
+    `crosses_period` is no longer read.
+  - `label_after_dataset_end` stays separate.
+  - A kept label ending after the cutoff raises (an invariant).
+  - Tests:
+    - a build running from 2023-06 into 2024: every in-universe row whose label ends in 2024 is
+      `label_crosses_period`, a label ending on 2023-12-29 is not, and no kept label ends after the cutoff;
+    - a hand-made frame checks each rule (period change, cutoff) on its own.
+- **Point in time.** Missing feature dates are no longer filled with the decision date. Dated rows are checked
+  (a late feature raises); rows without a `stock_features` row are counted in
+  `metadata.rows_without_stock_features`.
+- **`_cell`.**
+  - NumPy integers become `int`; floats become `float.hex`, with -0.0 as 0.0 and +/-inf as `inf` / `-inf`.
+  - NaN, None and NaT are null; NumPy and Python booleans become `bool`.
+  - A midnight Timestamp, a `date` or a `datetime64` gives an ISO date; a datetime with a time gives full ISO.
+  - Any other type raises.
+- **Concurrent publishers.**
+  - `write_dataset` takes an `O_EXCL` lock file per path, which is atomic across processes and threads.
+  - It refuses while another publisher holds the lock and refuses an existing destination; the lock and the
+    temporary directory are removed in every case.
+  - Test: 4 threads publish to one path; exactly 1 succeeds, the 3 others are refused, and the artifact verifies.
+- **Excluded candidates.** Test: for every excluded row with an interval (outside the universe included),
+  `label_start` and `label_end` equal the symbol's own next and h-th `daily_panel` sessions.
+- **Mutation check.** 20 mutations, all caught (13 earlier, re-anchored, and 7 new).
+  - One first survived: the period comparison, because for a research-only dataset every crossing is also past
+    the cutoff and the two rules masked each other. The hand-made test now checks each rule on its own, and
+    removing either rule is caught.
+
+### PR #11 second review: result (2026-11-12)
+
+Full suite: 688 passed (687 before).
+
+- **P2-1: stale publish lock.**
+  - The lock file records `{pid, host, created, token}`.
+  - A lock is recovered only when it is on the same host and its pid no longer runs. Recovery renames the lock to
+    a unique name, re-reads it, and gives it back if its content changed (a live lock taken in between), so a
+    live lock is never removed. Age is never used.
+  - A lock that cannot be checked (another host, unreadable content) is kept, and the error gives the manual
+    recovery: make sure no publisher runs, then delete the `.lock` file.
+  - Test: a lock left by an exited process is recovered and the artifact is published; a lock held by a live pid,
+    or written on another host, is kept unchanged and refused.
+- **P2-2: `np.datetime64("NaT")`** canonicalizes to null, with a regression assertion.
+- **Mutation check.** 24 mutations, all caught (20 earlier plus 4 new): NaT not null, stale lock never
+  recovered, live lock treated as stale, other host trusted.
+- CI is confirmed by the user on the pushed head.
+
+### PR #11 third review: result (2026-11-12)
+
+Full suite: 689 passed (688 before).
+
+- **P2: race in stale-lock recovery (confirmed).**
+  - `os.rename(lock, moved)` does not guarantee that the file renamed is the one just read. If publisher B reads a
+    stale lock, publisher A recovers it first and takes a new live lock, B then renames A's live lock, fails to
+    restore it because C has taken the path, and deletes it while A is still publishing.
+  - This cannot be closed with PID files and renames, so the recovery code is removed.
+- **Fix: an OS advisory lock.**
+  - `write_dataset` opens `.{name}.lock` (created if missing) and takes `fcntl.flock(LOCK_EX | LOCK_NB)`.
+  - It holds the lock for the whole publish and closes the descriptor in `finally`, which releases the lock.
+  - The kernel releases the lock when its holder exits, crashes or is killed, so there is no stale lock, no PID
+    or host bookkeeping, and no manual recovery.
+  - The lock file is never deleted. Deleting a flock file while another process holds it open would let two
+    publishers lock different inodes. The leftover empty `.lock` file is harmless.
+  - The file records `{pid, host, since}` for diagnostics only; nothing reads it.
+  - `flock` locks per open file description, so threads of one process also exclude each other (macOS and Linux).
+    POSIX only; the project runs on macOS.
+- **Tests.**
+  - 4 concurrent threads: exactly 1 publishes and 3 are refused. The lock file stays and no temporary directory
+    is left. A leftover lock file that nobody holds does not block a publish.
+  - A subprocess holds the lock:
+    - publishing is refused 3 times;
+    - the lock file keeps the same inode and the holder still holds it (a non-blocking flock from the test fails),
+      so a live lock is never removed;
+    - after SIGKILL (no cleanup), the kernel frees the lock and publishing succeeds; the lock file inode is
+      unchanged.
+  - A publish that raises still releases the lock: the next publish succeeds.
+- **Mutation check.** 25 mutations, all caught:
+  - 20 earlier dataset mutations; the 4 PID-recovery mutations no longer apply and are retired;
+  - 5 new: no flock, shared instead of exclusive lock, lock file unlinked after publish, descriptor never
+    closed, lock file replaced on acquire.

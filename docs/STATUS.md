@@ -206,6 +206,24 @@ Registry). Summary:
   - Second review fixes: the paper portfolio's traded-mark curve is required. A curve that cannot be measured
     (missing marks) makes the historical drawdown limit INCOMPLETE instead of being skipped. README and STATUS
     name `default/v2` as the default. 534 tests pass; 34 mutations, all caught.
+- PR #8 (Risk Engine PR 1) merged into `main` (`a46c661`).
+- Risk Engine PR 2 (plan `risk-engine-pr2-plan.md`, branch `risk-engine-pr2`, PR #9):
+  - stress scenarios `stress/v1` (market, industry, cluster, liquidity, suspension) in every risk run
+    (model `risk-v2`), MEASURED / INCOMPLETE, never summed;
+  - `quant risk evaluate --construction C1..C6`: a labelled current re-simulation, reconciled with the stored
+    run. Phase 0 found the historical grid runs not reproducible (warehouse not kept, uncommitted code); none
+    of C1 to C6 reconciles, and C1 / C4 have identical equity;
+  - read-only UI page "Risk" and a "Risk: evaluate paper portfolio" task;
+  - paper at 2026-11-09: uniform market -10% -> -10% of NAV; worst cluster -20% -> -5.9% (INCOMPLETE, 36.2%
+    unclustered); ADV halved -> 14.6% illiquid; top-3 suspension past 60 sessions -> -17.3%;
+  - 556 tests pass; 22 + 34 mutations, all caught.
+  - PR #9 review fixes:
+    - the construction snapshot reads the engine's own state (`run_targets(snapshot_at=...)`);
+    - reconciliation has declared required and not-recomputed metric sets: a missing metric or a NULL is never
+      a match;
+    - stress rejects non-finite betas, ADV and values;
+    - the suspension write-down is labelled as an assumption;
+    - 565 tests pass; 30 + 34 mutations, all caught.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate
   (keep or delete) is the user's call.

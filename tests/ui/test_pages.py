@@ -82,7 +82,7 @@ def _rendered_text(at: AppTest) -> str:
 
 
 @pytest.mark.parametrize("page", ["overview.py", "tasks.py", "symbol.py", "research.py", "backtest.py", "daily.py", "cross.py",
-                                  "watch.py"])
+                                  "watch.py", "risk.py"])
 def test_page_renders_read_only_without_token(env, page):
     before = _mtimes(env)
     at = AppTest.from_file(str(PAGES / page), default_timeout=60).run()
@@ -231,3 +231,45 @@ def test_watch_page_watchlist_and_staleness(env, monkeypatch):
         assert any("NOPE!" in w.value for w in at.warning)            # symbols are upper-cased
     finally:
         watchlist.path(env).unlink(missing_ok=True)
+
+
+def test_risk_page_without_runs(env):
+    at = AppTest.from_file(str(PAGES / "risk.py"), default_timeout=60).run()
+    assert not at.exception and any("No risk evaluation yet" in i.value for i in at.info)
+
+
+@pytest.fixture
+def risk_env(data_dir, tmp_path, monkeypatch):
+    """A copy of the UI data with one complete paper risk run and one failed risk run."""
+    from quant_research.risk import data, evaluate, limits
+    d = tmp_path / "data"
+    shutil.copytree(data_dir, d)
+    with ResultsStore(d / "results.duckdb", d / "research.duckdb") as store:
+        store.con.execute(f"ATTACH '{(d / 'cross.duckdb').as_posix()}' AS cx (READ_ONLY)")
+        evaluate.evaluate(store, data.paper_snapshot(store.con), limits.DEFAULT, NOW)
+        store.start_run("broken-risk", "risk", "forward", ResearchParams(), NOW)
+        store.con.execute("UPDATE research_runs SET status = 'failed' WHERE run_id = 'broken-risk'")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"FIREANT_TOKEN={TOKEN}\n")
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    monkeypatch.setenv("DATA_DIR", str(d))
+    return d
+
+
+def test_risk_page_shows_a_stored_run_read_only(risk_env):
+    before = _mtimes(risk_env)
+    at = AppTest.from_file(str(PAGES / "risk.py"), default_timeout=60).run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert _mtimes(risk_env) == before
+    text = _rendered_text(at)
+    assert "policy `default/v2`" in text.lower() or "Policy `default/v2`" in text
+    assert "scenario set `stress/v1`" in text and "risk model `risk-v2`" in text
+    assert "broken-risk (failed)" in text                                    # a failed run is listed, not hidden
+    tables = [df.value for df in at.dataframe]
+    stress = next(t for t in tables if "scenario_id" in t.columns)
+    assert set(stress["status"]) <= {"MEASURED", "INCOMPLETE"} and {"market", "suspension"} <= set(stress["family"])
+    limits_table = next(t for t in tables if "limit_name" in t.columns)
+    assert {"max_drawdown_historical", "current_drawdown_write_down"} <= set(limits_table["metric"])
+    incomplete = limits_table[limits_table["status"] == "INCOMPLETE"]
+    assert len(incomplete) and incomplete["reason"].str.len().gt(0).all()   # INCOMPLETE is shown with its reason
+    assert any("liquidation_days" in t.columns for t in tables)

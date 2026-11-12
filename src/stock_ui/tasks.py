@@ -71,6 +71,9 @@ TASKS: dict[str, TaskSpec] = {t.name: t for t in (
              "indexes for the Cross-stock and Market watch pages (about 40 s)", "quant", ("cross", "build")),
     TaskSpec("quant_daily", "Scan and daily report", "quant daily: scan new sessions, paper portfolio, report; "
              "with a date: re-scan that session", "quant", ("daily",), takes_date=True),
+    TaskSpec("risk_paper", "Risk: evaluate paper portfolio", "quant risk evaluate --paper: limits (policy "
+             "default/v2), liquidity, drawdown and stress scenarios of the current paper portfolio; writes a risk run, "
+             "never changes the portfolio (results on the Risk page)", "quant", ("risk", "evaluate", "--paper")),
     TaskSpec("invalidate_run", "Invalidate research run", "quant runs --invalidate RUN --reason TEXT: mark a run "
              "invalid (kept in the log, excluded from q-values)", "quant", ("runs",), takes_run=True, hidden=True),
 )}

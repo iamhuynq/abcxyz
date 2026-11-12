@@ -17,34 +17,15 @@ from quant_research import exposure
 from quant_research.backtest.metrics import WRITEDOWN_SESSIONS
 from quant_research.backtest.runner import PERIOD_RANGES
 from quant_research.results import ResearchParams, ResultsStore
-from quant_research.risk import data, limits, liquidity, metrics
+from quant_research.risk import data, limits, liquidity, metrics, stress
+from quant_research.risk import store as rstore
 from quant_research.risk.limits import LimitResult, Policy
 
-MODEL_VERSION = "risk-v1"
+MODEL_VERSION = "risk-v2"          # v2 (2026-11-12): stress scenarios in the same run; v1 runs have none
 ALLOWED_PERIODS = ("research", "forward")       # validation and holdout are frozen: never re-read for risk
 RECONCILIATION_TOLERANCE = 0.01                  # |NAV - cash - positions| above this share of NAV: INCOMPLETE
 HISTORY_ONLY = ("max_drawdown_historical",)      # limits that need only the stored equity curves, not the positions
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS risk_policies (
-    policy_id VARCHAR NOT NULL, version VARCHAR NOT NULL, config VARCHAR NOT NULL, created_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (policy_id, version));
-CREATE TABLE IF NOT EXISTS risk_evaluations (
-    run_id VARCHAR PRIMARY KEY, target VARCHAR NOT NULL, valuation_date DATE NOT NULL, policy_id VARCHAR NOT NULL,
-    policy_version VARCHAR NOT NULL, model_version VARCHAR NOT NULL, status VARCHAR NOT NULL, nav DOUBLE,
-    cash DOUBLE, notes VARCHAR);
-CREATE TABLE IF NOT EXISTS risk_metrics (
-    run_id VARCHAR NOT NULL, scope VARCHAR NOT NULL, metric VARCHAR NOT NULL, value DOUBLE, note VARCHAR,
-    PRIMARY KEY (run_id, scope, metric));
-CREATE TABLE IF NOT EXISTS risk_limit_results (
-    run_id VARCHAR NOT NULL, limit_name VARCHAR NOT NULL, metric VARCHAR NOT NULL, value DOUBLE, warning DOUBLE,
-    breach DOUBLE, status VARCHAR NOT NULL, reason VARCHAR, affected VARCHAR, PRIMARY KEY (run_id, limit_name));
-CREATE TABLE IF NOT EXISTS risk_positions (
-    run_id VARCHAR NOT NULL, symbol VARCHAR NOT NULL, value DOUBLE, weight DOUBLE, industry VARCHAR,
-    cluster VARCHAR, beta DOUBLE, vol_ann DOUBLE, risk_share DOUBLE, adv DOUBLE, liquidation_days DOUBLE,
-    illiquid BOOLEAN, liquidation_cost DOUBLE, cost_fallback BOOLEAN, stale_sessions INTEGER, stale BOOLEAN,
-    conditional BOOLEAN, note VARCHAR, PRIMARY KEY (run_id, symbol));
-"""
 
 
 @dataclass
@@ -54,6 +35,7 @@ class Assessment:
     metrics: list[tuple[str, str, float | None, str]]        # scope, metric, value, note
     positions: pd.DataFrame
     notes: list[str] = field(default_factory=list)
+    position_issues: list[str] = field(default_factory=list)     # why the positions cannot be trusted ([] if fine)
 
 
 def _f(x) -> float | None:
@@ -124,7 +106,8 @@ def assess(snap: data.Snapshot, inputs: pd.DataFrame, rets: dict, cluster_of: di
     nav = snap.nav
     if not nav or nav <= 0 or not np.isfinite(nav):
         res = limits.evaluate(policy, {}, missing={lim.metric: "NAV missing or not positive" for lim in policy.limits})
-        return Assessment(limits.INCOMPLETE, res, [], pos, ["NAV missing or not positive"])
+        return Assessment(limits.INCOMPLETE, res, [], pos, ["NAV missing or not positive"],
+                          ["NAV missing or not positive"])
     issues, unvalued = _snapshot_issues(snap)
     pos["value"] = pos["value"].where(~pos["symbol"].isin(unvalued), 0.0)   # computed on, but never trusted
     pos["weight"] = pos["value"] / nav
@@ -143,7 +126,7 @@ def assess(snap: data.Snapshot, inputs: pd.DataFrame, rets: dict, cluster_of: di
                 acc.missing[lim.metric] = "; ".join(issues + ([acc.missing[lim.metric]] if lim.metric in acc.missing
                                                               else []))
     results = limits.evaluate(policy, acc.vals, acc.affected, acc.missing)
-    return Assessment(limits.overall(results), results, acc.out, pos, list(snap.notes))
+    return Assessment(limits.overall(results), results, acc.out, pos, list(snap.notes), issues)
 
 
 def _snapshot_issues(snap: data.Snapshot) -> tuple[list[str], tuple[str, ...]]:
@@ -297,30 +280,29 @@ def period_of(day: date) -> str:
     raise ValueError(f"date {day} outside every period")
 
 
-def register_policy(store: ResultsStore, policy: Policy, now: datetime) -> None:
-    """Policies are frozen: the same id and version with another configuration is refused."""
-    row = store.con.execute("SELECT config FROM risk_policies WHERE policy_id = ? AND version = ?",
-                            [policy.policy_id, policy.version]).fetchone()
-    if row is None:
-        store.con.execute("INSERT INTO risk_policies VALUES (?, ?, ?, ?)",
-                          [policy.policy_id, policy.version, policy.to_json(), now])
-    elif row[0] != policy.to_json():
-        raise ValueError(f"policy {policy.key} is stored with another configuration; create a new version")
-
-
 def evaluate(store: ResultsStore, snap: data.Snapshot, policy: Policy, now: datetime,
-             liq: liquidity.LiquidityParams = liquidity.LiquidityParams()) -> tuple[str, Assessment]:
+             liq: liquidity.LiquidityParams = liquidity.LiquidityParams(),
+             scenarios: stress.ScenarioSet | None = stress.STRESS_V1,
+             extra: dict | None = None,
+             reconciliation: tuple[str, list[tuple]] | None = None) -> tuple[str, Assessment]:
+    """Assess the snapshot, run the stress scenarios on the same assessed positions (unless `scenarios` is None),
+    and store everything under one run of kind `risk`. `extra`: more run parameters (e.g. a re-simulation)."""
     period = period_of(snap.valuation_date)
     if period not in ALLOWED_PERIODS:
         raise ValueError(f"valuation date {snap.valuation_date} is in the {period} period, which is frozen; "
                          f"risk evaluations use {' or '.join(ALLOWED_PERIODS)} dates only")
-    store.con.execute(SCHEMA)
-    register_policy(store, policy, now)
-    slug = snap.target.replace(":", "-").replace("/", "-")
+    store.con.execute(rstore.SCHEMA)
+    rstore.register_policy(store, policy, now)
+    if scenarios is not None:
+        rstore.register_scenarios(store, scenarios, now)
+    slug = snap.target.replace(":", "-").replace("/", "-").replace("@", "-")
     run_id = f"{now:%Y%m%dT%H%M%S}-risk-{slug}-{period}"
+    if store.con.execute("SELECT count(*) FROM research_runs WHERE run_id = ?", [run_id]).fetchone()[0]:
+        raise ValueError(f"run {run_id} already exists (same target in the same second); run it again")
     params = ResearchParams(extra={"target": snap.target, "valuation_date": str(snap.valuation_date),
                                    "policy": policy.key, "model_version": MODEL_VERSION, "liquidity": asdict(liq),
-                                   "exposure_sessions": data.EXPOSURE_SESSIONS})
+                                   "exposure_sessions": data.EXPOSURE_SESSIONS,
+                                   "scenarios": scenarios.key if scenarios else None, **(extra or {})})
     store.start_run(run_id, "risk", period, params, now)
     symbols = tuple(snap.positions["symbol"])
     a = assess(snap, data.market_inputs(store.con, symbols, snap.valuation_date),
@@ -328,24 +310,10 @@ def evaluate(store: ResultsStore, snap: data.Snapshot, policy: Policy, now: date
                {"returns": pd.DataFrame(), "market": pd.Series(dtype=float)},
                data.clusters(store.con, symbols, snap.valuation_date), data.factor_z(store.con, snap.valuation_date),
                policy, liq)
-    _store(store, run_id, snap, policy, a)
+    rstore.save_assessment(store, run_id, snap, policy, a, MODEL_VERSION)
+    if reconciliation is not None:          # (source run, rows) of a re-simulated portfolio
+        rstore.save_reconciliation(store, run_id, *reconciliation)
+    if scenarios is not None:
+        rstore.save_stress(store, run_id, stress.run(a.positions, snap.nav, a.position_issues, scenarios, liq))
     store.finish_run(run_id)
     return run_id, a
-
-
-def _store(store: ResultsStore, run_id: str, snap: data.Snapshot, policy: Policy, a: Assessment) -> None:
-    con = store.con
-    con.execute("INSERT INTO risk_evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [run_id, snap.target, snap.valuation_date, policy.policy_id, policy.version, MODEL_VERSION, a.status,
-                 snap.nav, snap.cash, "\n".join(a.notes)])
-    con.executemany("INSERT INTO risk_metrics VALUES (?, ?, ?, ?, ?)",
-                    [(run_id, s, m, _f(v), n) for s, m, v, n in a.metrics])
-    con.executemany("INSERT INTO risk_limit_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [(run_id, r.limit, r.metric, _f(r.value), r.warning, r.breach, r.status, r.reason,
-                      ", ".join(r.affected)) for r in a.limit_results])
-    cols = ["symbol", "value", "weight", "industry", "cluster", "beta", "vol_ann", "risk_share", "adv", "liquidation_days",
-            "illiquid", "liquidation_cost", "cost_fallback", "stale_sessions", "stale", "conditional", "note"]
-    p = a.positions.reindex(columns=cols)
-    con.executemany(f"INSERT INTO risk_positions VALUES (?, {', '.join(['?'] * len(cols))})",
-                    [(run_id, *[None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row])
-                     for row in p.itertuples(index=False)])

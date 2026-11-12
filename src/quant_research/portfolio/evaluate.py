@@ -96,6 +96,36 @@ def cash_mask(store: ResultsStore, market: Market, cash_when: tuple[str, str] | 
     return np.array([rows.get(d) == state for d in market.dates.tolist()])
 
 
+@dataclass(frozen=True)
+class Prepared:
+    market: Market
+    scores: np.ndarray
+    industry: np.ndarray
+    cash_on: np.ndarray | None
+
+
+def prepare(store: ResultsStore, cfg: Config, period: str = "research",
+            rule: UniverseRule = UniverseRule()) -> Prepared:
+    """The inputs of one configuration: the market from the first scored session, scores, industries, cash rule.
+    Shared by `evaluate` and the Risk Engine's re-simulation (one code path; nothing is written)."""
+    full = runner._market(store, period, rule)
+    scores = score_matrix(store, full, cfg.signal)
+    has = np.flatnonzero(np.isfinite(scores).any(axis=1))
+    window = slice(int(has[0]) if len(has) else 0, len(full.dates))
+    market, scores = runner._slice(full, window), scores[window]
+    return Prepared(market, scores, key_matrices(store.con, market)["industry"],
+                    cash_mask(store, market, cfg.cash_when))
+
+
+def simulate(p: Prepared, cfg: Config, capital: float = DECISION[0], costs: CostModel | None = COSTS[DECISION[1]],
+             sell_lag: int = SELL_LAG, writedown_after: int | None = None,
+             snapshot_at: int | None = None) -> PortfolioResult:
+    """One simulation of a configuration (pure: nothing is stored). `snapshot_at`: also keep the engine's state at
+    the close of that session (`PortfolioResult.state`)."""
+    return run_targets(p.market, cfg.construction, lambda i: p.scores[i], cfg.schedule, capital, p.industry, p.cash_on,
+                       costs, sell_lag, writedown_after, snapshot_at)
+
+
 def already_run(store: ResultsStore, name: str, period: str) -> str | None:
     row = store.con.execute("""SELECT run_id FROM research_runs WHERE status = 'ok' AND kind = 'portfolio'
                                AND pattern_name = ? AND period = ? ORDER BY created_at DESC LIMIT 1""",
@@ -114,13 +144,8 @@ def evaluate(store: ResultsStore, name: str, now: datetime, period: str = "resea
     cfg = configs[name]
     store.con.execute(SCHEMA)
     store.con.execute(controls.SCHEMA)
-    full = runner._market(store, period, rule)
-    scores = score_matrix(store, full, cfg.signal)
-    has = np.flatnonzero(np.isfinite(scores).any(axis=1))
-    window = slice(int(has[0]) if len(has) else 0, len(full.dates))
-    market, scores = runner._slice(full, window), scores[window]
-    industry = key_matrices(store.con, market)["industry"]
-    cash_on = cash_mask(store, market, cfg.cash_when)
+    prep = prepare(store, cfg, period, rule)
+    market, scores, industry, cash_on = prep.market, prep.scores, prep.industry, prep.cash_on
     run_id = f"{now:%Y%m%dT%H%M%S}-portfolio-{name}-{period}"
     store.start_run(run_id, "portfolio", period, ResearchParams(extra={"config": asdict(cfg), "universe": asdict(rule),
                     "capitals": capitals, "n_control": n_control}), now, (name, config_version(cfg)))

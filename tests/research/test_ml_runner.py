@@ -360,8 +360,19 @@ def test_the_primary_result_and_cross_fold_keys_are_checked(published, tmp_path)
     m = json.loads((path3 / "manifest.json").read_text())
     m["folds"][1]["incremental_mean_ic"] += 0.01                              # the manifest is not hashed
     (path3 / "manifest.json").write_text(json.dumps(m))
-    with pytest.raises(runner.ContractError, match="metrics differ"):
+    with pytest.raises(runner.ContractError, match="metrics.json differs from the manifest"):
         runner.verify_run(path3)
+    (path3 / "folds/001/metrics.json").write_text(json.dumps(m["folds"][1]))  # both sources edited alike
+    _rehash(path3)
+    with pytest.raises(runner.ContractError, match="metrics differ from the values recomputed"):
+        runner.verify_run(path3)
+    path5, _ = _copy(published, tmp_path / "e")
+    mj = json.loads((path5 / "folds/002/metrics.json").read_text())
+    mj["valid_dates"] -= 1                                                    # metrics.json alone, rehashed
+    (path5 / "folds/002/metrics.json").write_text(json.dumps(mj))
+    _rehash(path5)
+    with pytest.raises(runner.ContractError, match="fold 2 metrics.json differs from the manifest"):
+        runner.verify_run(path5)
     path4, _ = _copy(published, tmp_path / "d")
     import shutil
     shutil.rmtree(path4 / "folds/001/model")
@@ -371,27 +382,62 @@ def test_the_primary_result_and_cross_fold_keys_are_checked(published, tmp_path)
         runner.verify_run(path4)
 
 
-def test_predictions_regenerated_with_consistent_hashes_are_caught_with_the_dataset(published, tmp_path):
-    path, result = _copy(published, tmp_path)
-    runner.verify_run(path, result)
-    # a coherent forgery: shift every prediction of fold 3 and recompute daily IC, metrics, primary and hashes
+def _forge(path, fold, change):
+    """A coherent forgery of one fold: rewrite its predictions, then recompute its daily IC, counts, means and key
+    hash, the primary result and every file hash, so that level-1 verification passes."""
     from quant_research.ml import evaluation
-    from quant_research.ml.run_verify import eval_frame, fold_means
-    _rewrite(path, "folds/003/predictions.parquet", lambda df: df.__setitem__("prediction", df["prediction"] ** 3))
-    pred = pd.read_parquet(path / "folds/003/predictions.parquet")
+    from quant_research.ml.run_verify import dates, eval_frame, fold_means, key_hash
+    _rewrite(path, f"folds/{fold:03d}/predictions.parquet", change)
+    pred = pd.read_parquet(path / f"folds/{fold:03d}/predictions.parquet")
     m = json.loads((path / "manifest.json").read_text())
-    fold = next(f for f in m["folds"] if f["fold"] == 3)
-    daily, counts = evaluation.daily_incremental_ic(eval_frame(pred), fold["baseline_sign"])
-    daily.to_parquet(path / "folds/003/daily_ic.parquet", index=False)
-    fold.update(counts, **fold_means(daily))
+    entry = next(f for f in m["folds"] if f["fold"] == fold)
+    daily, counts = evaluation.daily_incremental_ic(eval_frame(pred), entry["baseline_sign"])
+    daily.to_parquet(path / f"folds/{fold:03d}/daily_ic.parquet", index=False)
+    entry.update(counts, **fold_means(daily))
+    entry["test_keys_hash"] = key_hash(dates(pred["date"]), pred["symbol"].astype(str).to_numpy())
+    (path / f"folds/{fold:03d}/metrics.json").write_text(json.dumps(entry))
     series = [pd.read_parquet(path / f"folds/{f['fold']:03d}/daily_ic.parquet").assign(
         date=lambda x: pd.to_datetime(x["date"]).dt.date) for f in m["folds"]]
     m["primary"] = json.loads(json.dumps(evaluation.primary_test(pd.concat(series, ignore_index=True), 5)))
     (path / "manifest.json").write_text(json.dumps(m))
     _rehash(path)
-    runner.verify_run(path)                                                  # consistent without the dataset
-    with pytest.raises(runner.ContractError, match="differ from the model and dataset"):
-        runner.verify_run(path, result)
+
+
+def _set(col, values):
+    def change(df):
+        df[col] = values(df)
+    return change
+
+
+@pytest.mark.parametrize("change, why", [
+    (_set("prediction", lambda df: df["prediction"] ** 3), "keys, labels or predictions"),     # monotone: same ranks
+    (_set("symbol", lambda df: ["ZZZ"] + df["symbol"].tolist()[1:]), "keys, labels or predictions"),
+    (_set("date", lambda df: [date(2021, 1, 4)] + pd.to_datetime(df["date"]).dt.date.tolist()[1:]),
+     "keys, labels or predictions"),
+    (_set("row", lambda df: df["row"] + 1), "keys, labels or predictions"),
+    (_set("label", lambda df: df["label"].iloc[::-1].to_numpy()), "keys, labels or predictions"),
+    (_set("baseline_score", lambda df: df["baseline_score"] * 0.5), "baseline scores differ"),  # same ranks
+])
+def test_a_coherent_forgery_passes_level_one_and_fails_against_the_inputs(published, tmp_path, store, change, why):
+    path, result = _copy(published, tmp_path)
+    _forge(path, 3, change)
+    runner.verify_run(path)                                                  # level 1: internally consistent
+    _, _ds, baseline, _ = _prepared(store)
+    with pytest.raises(runner.ContractError, match=why):
+        runner.verify_run(path, result, baseline)
+    with pytest.raises(runner.ContractError, match=why):
+        runner.reverify(store, SPEC, path)
+    if why == "baseline scores differ":
+        runner.verify_run(path, result)                                      # the dataset alone cannot see it
+
+
+def test_reverify_passes_on_the_run_and_refuses_another_experiment(published, tmp_path, store):
+    path, _ = _copy(published, tmp_path)
+    assert runner.reverify(store, SPEC, path)["experiment_id"] == SPEC.experiment_id
+    with pytest.raises(runner.ContractError, match="was made by"):
+        runner.reverify(store, replace(SPEC, seed=1), path)
+    with pytest.raises(runner.ContractError, match="only together with its dataset"):
+        runner.verify_run(path, None, np.zeros(3))
 
 
 HOLD = ("import fcntl, os, sys, time\n"

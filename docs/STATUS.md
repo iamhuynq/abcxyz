@@ -269,7 +269,9 @@ Registry). Summary:
     `finish_run` in one transaction);
   - review fixes: run artifacts verified by file hashes and by recomputation (optionally from the fold models),
     finite paired samples, duplicate keys refused, a per-experiment lock, metric definitions;
-  - 848 tests pass; 45 mutations, all caught;
+  - second review: `metrics.json` checked against the manifest; level-2 verification of keys, labels, predictions
+    and baseline (`runner.reverify` rebuilds them from `research.duckdb`); verification levels documented;
+  - 854 tests pass; 52 mutations, all caught;
   - before a real run: `quant build` (the current `research.duckdb` predates the PR #10 build metadata);
   - next: PR #14, performance analysis of the persisted predictions.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,

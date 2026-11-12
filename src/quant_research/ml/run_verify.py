@@ -1,12 +1,18 @@
-"""Verification of a published walk-forward run directory (docs/ml-plan.md, PR #13 review).
+"""Verification of a published walk-forward run directory (docs/ml-plan.md, PR #13 reviews).
 
-Two layers:
-- Integrity: the manifest records a SHA-256 of every fold file; any change to a file is detected. This is not a
-  signature: whoever rewrites the files and the manifest can recompute the hashes.
-- Consistency: from the stored predictions, the test keys (unique within and across folds, equal to the recorded
-  key hash), the per-fold constants, the daily incremental IC, the fold means and the primary test are recomputed
-  and must equal what was stored. With the verified dataset, every prediction is also recomputed from its loaded
-  model.
+What is checked, by level:
+1. `verify_run(path)`: the directory is internally consistent.
+   - Integrity: the manifest records a SHA-256 of every fold file, and each is recomputed.
+   - Consistency: from the stored predictions, the test keys (unique within and across folds, equal to the
+     recorded key hash), the per-fold constants, the daily incremental IC, the fold metrics (each fold's
+     metrics.json equals its manifest entry) and the primary test are recomputed and must equal what was stored.
+2. `verify_run(path, dataset, baseline)` (or runner.reverify, which rebuilds both from research.duckdb): the
+   stored rows, dates, symbols, labels and baseline scores equal the dataset rows and the baseline of the
+   recorded factor build, and every prediction is recomputed from its fold model. The baseline can be re-verified
+   only while research.duckdb holds the run's build.
+3. Neither level proves who wrote the directory: a complete, consistent replacement of the directory passes both.
+   SHA-256 here is an integrity check, not a signature. The authoritative record is research_runs and
+   hypothesis_log (status and the logged p-value); a consumer compares the manifest with it.
 """
 
 import hashlib
@@ -67,9 +73,13 @@ def _fail(path, why: str) -> None:
     raise ContractError(f"{path}: {why}")
 
 
-def verify_run(path: Path, dataset=None) -> dict:
-    """Return the manifest of a consistent run directory, or raise ContractError. `dataset`: the run's dataset (a
-    DatasetResult or a read_dataset pair); when given, predictions are recomputed from the fold models."""
+def verify_run(path: Path, dataset=None, baseline: np.ndarray | None = None) -> dict:
+    """Return the manifest of a consistent run directory, or raise ContractError (levels in the module docstring).
+    `dataset`: the run's dataset (a DatasetResult or a read_dataset pair); when given, predictions are recomputed
+    from the fold models and the stored keys and labels compared with the dataset rows. `baseline`: the baseline
+    score of every dataset row (runner.load_baseline), compared with the stored baseline_score; needs `dataset`."""
+    if baseline is not None and dataset is None:
+        raise ContractError("a baseline can be verified only together with its dataset")
     root = Path(path)
     try:
         manifest = json.loads((root / "manifest.json").read_text())
@@ -91,6 +101,12 @@ def verify_run(path: Path, dataset=None) -> dict:
         pred = pd.read_parquet(out / "predictions.parquet")
         if len(pred) != m["test_rows"]:
             _fail(root, f"fold {i} predictions are incomplete")
+        try:
+            stored_metrics = json.loads((out / "metrics.json").read_text())
+        except (OSError, ValueError):
+            stored_metrics = None
+        if stored_metrics != m:
+            _fail(root, f"fold {i} metrics.json differs from the manifest")
         consts = {"fold": i, "model_id": m["model_id"], "baseline_sign": m["baseline_sign"],
                   "dataset_fingerprint": manifest["dataset_fingerprint"]}
         if any(set(pred[c]) != {v} for c, v in consts.items()):
@@ -109,10 +125,19 @@ def verify_run(path: Path, dataset=None) -> dict:
         if any(counts[k] != m[k] for k in COUNT_KEYS) or any(v != m[k] for k, v in fold_means(daily).items()):
             _fail(root, f"fold {i} metrics differ from the values recomputed from its predictions")
         if dataset is not None:
-            again = training.predict_model(trained, dataset, pred["row"].to_numpy())
-            if not (np.array_equal(again["prediction"].to_numpy(), pred["prediction"].to_numpy())
-                    and np.array_equal(again["label"].to_numpy(), pred["label"].to_numpy())):
-                _fail(root, f"fold {i} predictions or labels differ from the model and dataset")
+            rows = pred["row"].to_numpy()
+            again = training.predict_model(trained, dataset, rows)               # keys and labels: the dataset's
+            # row identity: the dataset row named by `row` must carry the stored date, symbol, label and prediction
+            same = (np.array_equal(dates(again["date"]), day)
+                    and np.array_equal(again["symbol"].astype(str).to_numpy(), sym)
+                    and np.array_equal(again["label"].to_numpy(), pred["label"].to_numpy())
+                    and np.array_equal(again["prediction"].to_numpy(), pred["prediction"].to_numpy()))
+            if not same:
+                _fail(root, f"fold {i} rows, keys, labels or predictions differ from the model and dataset")
+            if baseline is not None and not np.array_equal(np.asarray(baseline, dtype=np.float64)[rows],
+                                                          pred["baseline_score"].to_numpy(dtype=np.float64),
+                                                          equal_nan=True):
+                _fail(root, f"fold {i} baseline scores differ from the factor build")
         series.append(daily)
     primary = evaluation.primary_test(pd.concat(series, ignore_index=True), horizon)
     if _json(primary) != manifest.get("primary"):

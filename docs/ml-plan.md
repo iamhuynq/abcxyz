@@ -1484,3 +1484,71 @@ Full suite: 848 passed (827 before). `test_ml_evaluation.py` 18, `test_ml_runner
   NaN-baseline rule, now part of the finite-pair rule) and 15 new ones. Six survived the first run (the sign
   sample, and five verification checks whose tests matched another check's message or were missing) and were
   caught after the tests were made specific.
+
+## PR #13 second review (external, 2026-11-12, head `02a1407`): assessment and plan
+
+1. **[P2] `metrics.json` is not compared with the manifest: confirmed.** `verify_run` checks the fold metrics in
+   `manifest["folds"]` only. A `metrics.json` rewritten together with its hash would pass, so the two sources
+   could disagree.
+   - Plan: each fold's `metrics.json` must equal its manifest entry, compared as JSON.
+   - Test: an edited `metrics.json` with its hash rewritten is refused.
+2. **[P2] The dataset-backed check covers predictions and labels only: confirmed.**
+   - Row, date and symbol are not compared with the dataset, and the baseline cannot be checked at all, because
+     it comes from `stock_factors`, not from the dataset.
+   - Plan:
+     - With a dataset, the stored `row`, `date`, `symbol`, `label` and `prediction` must all equal the
+       dataset row and the recomputed prediction.
+     - `verify_run(path, dataset, baseline)` also takes the baseline aligned to the dataset rows; the stored
+       `baseline_score` must equal `baseline[row]` (NaN equal to NaN).
+     - New `runner.reverify(store, spec, path)` rebuilds both inputs exactly as `run_experiment` does
+       (`check_build` with the baseline, `build_dataset`, `load_baseline`) from `research.duckdb`. It refuses
+       unless the spec's `experiment_id`, the dataset fingerprint and the build id equal the manifest's, then
+       runs the full check.
+     - The baseline is verified only against the factor build that the build check accepts. A rebuilt
+       `research.duckdb` (a new build id) cannot re-verify an older run: this is stated in the contract.
+   - Tests:
+     - a changed date, symbol, row or baseline score, with hashes and metrics kept consistent, is refused with
+       the inputs and passes without them;
+     - `reverify` passes on an untouched run and refuses a wrong experiment.
+3. **[P3] Integrity is not authenticity: agreed, documented.** The `run_verify` docstring and this plan will
+   state three levels:
+   - `verify_run(path)`: the run directory is internally consistent, and its files match its manifest;
+   - with inputs (`reverify`): its predictions, keys, labels and baseline follow from the recorded model,
+     dataset and factor build;
+   - neither proves who wrote the directory: a complete, consistent replacement of the directory passes both.
+   The authoritative record is `research_runs` and `hypothesis_log` (status, the logged p-value). PR #14 must
+   compare the manifest's primary p-value with the logged one, and must not treat a verified directory as proof
+   of origin. No schema change is made for this.
+
+### PR #13 second review fixes: result (2026-11-12)
+
+Full suite: 854 passed (848 before); `test_ml_runner.py` has 34 tests.
+
+- **`metrics.json`.** Each fold's file must equal its manifest entry. Tests:
+  - an edited manifest entry is refused;
+  - the same edit in both sources (rehashed) is refused by the recomputation;
+  - an edited `metrics.json` alone (rehashed) is refused.
+- **Level 2, `verify_run(path, dataset, baseline)`.**
+  - With the dataset, the dataset row named by each stored `row` must carry the stored date, symbol and label,
+    and the recomputed prediction must equal the stored one.
+  - With the baseline (aligned to the dataset rows), the stored `baseline_score` must equal it, NaN equal to
+    NaN. A baseline without a dataset is refused.
+  - A literal comparison of the returned `row` column with the requested rows was dropped: `predict_model`
+    returns exactly the rows it is given, so the comparison could never fail. Row identity is the key, label and
+    prediction check above.
+- **`runner.reverify(store, spec, path)`.** It rebuilds the dataset and the baseline with `_inputs`, the same
+  function `run_experiment` uses (`check_build` with the baseline, `build_dataset`, `load_baseline`). It refuses
+  unless the experiment id, the dataset fingerprint and the build id equal the manifest's, then runs level 2.
+- **Tests.**
+  - Six coherent forgeries of one fold pass level 1 and are refused by level 2 and by `reverify`. Each one
+    recomputes the daily IC, counts, means, key hash, `metrics.json`, the primary result and every hash. They
+    are: predictions cubed (same ranks), a changed symbol, a changed date, shifted rows, reversed labels, and
+    baseline scores halved (same ranks).
+  - The halved baseline also passes with the dataset alone, which shows why the baseline input is needed.
+  - `reverify` passes on the untouched run and refuses another experiment.
+- **Verification levels** (`run_verify` docstring): (1) internal consistency; (2) consistency with the recorded
+  inputs, while `research.duckdb` holds the run's build; (3) neither proves who wrote the directory.
+  `research_runs` and `hypothesis_log` stay authoritative, and PR #14 compares the manifest's p-value with the
+  logged one.
+- **Mutation check.** 52 mutations, all caught (45 earlier, one re-anchored, and 7 new). One survived the first
+  run (labels ignored at level 2) and was caught after a reversed-label forgery was added.

@@ -46,7 +46,7 @@ from quant_research.ml.splits import Fold, check_fold, folds, purge
 from quant_research.results import ResearchParams, ResultsStore
 
 INTERVAL = ["date", "label_start", "label_end"]
-__all__ = ["RUN_SCHEMA", "ExperimentRefused", "preflight", "run_experiment", "verify_run"]
+__all__ = ["RUN_SCHEMA", "ExperimentRefused", "preflight", "reverify", "run_experiment", "verify_run"]
 
 
 class ExperimentRefused(ContractError):
@@ -188,9 +188,9 @@ def _lock_dir(store: ResultsStore, runs_dir: Path) -> Path:
     return (Path(row[0]).parent if row and row[0] else Path(runs_dir)) / "ml-locks"
 
 
-def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, now: datetime) -> tuple[str, dict]:
-    """Run one experiment end to end; returns (run_id, primary test). Raises ExperimentRefused before any run
-    exists when the data, the folds or an earlier run do not allow it."""
+def _inputs(store: ResultsStore, spec: ExperimentSpec):
+    """(model spec, build id, dataset result, verified dataset, aligned baseline), built the same way for a run
+    and for its re-verification."""
     if not isinstance(spec, ExperimentSpec):
         raise ExperimentRefused("spec must be an ExperimentSpec")
     model = ModelSpec(spec.model, dict(spec.params), spec.seed)
@@ -200,7 +200,30 @@ def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, no
     check_build(store.con, build_id, spec.dataset, spec.baseline, schema="rs.")
     result = build_dataset(store.con, spec.dataset, build_id, schema="rs.")
     ds = training.open_dataset(result)
-    baseline = load_baseline(store.con, spec, ds.data)
+    return model, build_id, result, ds, load_baseline(store.con, spec, ds.data)
+
+
+def reverify(store: ResultsStore, spec: ExperimentSpec, path: Path) -> dict:
+    """Level-2 verification of a run directory (run_verify docstring): rebuild the dataset and the baseline from
+    research.duckdb exactly as the run did, refuse unless the experiment, the dataset fingerprint and the build id
+    are the manifest's, then check every stored row, key, label, baseline score and prediction. A research.duckdb
+    rebuilt since the run (another build id) cannot re-verify it."""
+    try:
+        manifest = json.loads((Path(path) / "manifest.json").read_text())
+    except (OSError, ValueError) as e:
+        raise ContractError(f"{path}: unreadable run manifest ({type(e).__name__})") from None
+    _model, build_id, result, ds, baseline = _inputs(store, spec)
+    ours = (spec.experiment_id, ds.fingerprint, build_id)
+    theirs = (manifest.get("experiment_id"), manifest.get("dataset_fingerprint"), manifest.get("build_id"))
+    if ours != theirs:
+        raise ContractError(f"{path}: the run was made by (experiment, dataset, build) {theirs}, not {ours}")
+    return verify_run(path, result, baseline)
+
+
+def run_experiment(store: ResultsStore, spec: ExperimentSpec, runs_dir: Path, now: datetime) -> tuple[str, dict]:
+    """Run one experiment end to end; returns (run_id, primary test). Raises ExperimentRefused before any run
+    exists when the data, the folds or an earlier run do not allow it."""
+    model, build_id, result, ds, baseline = _inputs(store, spec)
     plans = preflight(ds, baseline, load_calendar(store.con, spec), spec.split)
     lock_dir = _lock_dir(store, Path(runs_dir))
     lock_dir.mkdir(parents=True, exist_ok=True)

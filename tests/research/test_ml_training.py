@@ -1,8 +1,10 @@
 """Fit and predict on explicit rows of one verified dataset (docs/ml-plan.md, PR #12): index checks, dataset checks,
 leakage and adversarial cases, order and key preservation, reproducibility across processes."""
 
+import json
 import subprocess
 import sys
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -212,3 +214,85 @@ def test_model_id_is_stable_across_processes(ds, tmp_path):
             "    print(training.fit_model(d, list(range(n // 2)), s).model_id)\n")
     out = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True, check=True)
     assert set(out.stdout.split()) == ids and len(ids) == 3
+
+
+def _meta_edit(m, path, value):
+    """A deep copy of the metadata with one nested entry replaced, or removed when value is DROP."""
+    m = json.loads(json.dumps(dict(m)))
+    *head, last = path
+    target = m
+    for k in head:
+        target = target[k]
+    if value is DROP:
+        del target[last]
+    else:
+        target[last] = value
+    return MappingProxyType(m)
+
+
+DROP = object()
+
+
+@pytest.mark.parametrize("path, value, why", [
+    (("training",), DROP, "keys must be exactly"),
+    (("extra",), 1, "keys must be exactly"),
+    (("features",), ["a", "b", "c"], r"\[name, source_version\] pairs"),
+    (("features", 0), ["stock_features.return_5d", ""], r"\[name, source_version\] pairs"),
+    (("features", 1, 0), "stock_features.return_5d", "names unique"),
+    (("features", 0, 1), "other-version", "differ from the dataset provenance"),
+    (("label",), 5, "label differs"),
+    (("horizon",), 5.0, "horizon must be an int"),
+    (("horizon",), 10, "horizon must be an int"),
+    (("dataset_fingerprint",), "0" * 16, "not reproduced"),
+    (("dataset_provenance", "content_hash"), "x", "not reproduced"),
+    (("dataset_provenance", "columns"), None, "feature order"),
+    (("training", "rows"), 0, "training rows"),
+    (("training", "rows"), True, "training rows"),
+    (("training", "rows"), 10**6, "training rows"),
+    (("training", "keys_hash"), "short", "keys_hash"),
+    (("training", "first_date"), "2022-13-01", "ISO dates"),
+    (("training", "first_date"), "2030-01-01", "out of order"),
+    (("training", "first_label_start"), "2000-01-01", "out of order"),
+    (("training", "last_label_end"), "2000-01-01", "out of order"),
+    (("training", "extra"), 1, "training must have exactly"),
+    (("solver",), [], "solver must be a mapping"),
+    (("environment",), "", "environment"),
+    (("model_code_hash",), None, "model_code_hash"),
+])
+def test_malformed_metadata_cannot_make_a_trained_model(ds, path, value, why):
+    from dataclasses import replace
+    t = training.fit_model(ds, list(range(50)), RIDGE)
+    bad = _meta_edit(t.metadata, path, value)
+    with pytest.raises(ContractError, match=why):
+        replace(t, metadata=bad, model_id=training.model_identity(t.spec, t.fitted, bad))   # even with its own id
+
+
+def test_metadata_edited_after_construction_is_caught_on_use(ds, tmp_path):
+    from quant_research.ml import artifacts
+    t = training.fit_model(ds, list(range(50)), RIDGE)
+    t.metadata["training"]["rows"] = 49                                    # nested dicts stay mutable
+    with pytest.raises(ContractError, match="model_id"):
+        training.predict_model(t, ds, [60])
+    with pytest.raises(ContractError, match="model_id"):
+        artifacts.save_model(t, tmp_path / "m")
+    t.metadata["training"]["rows"] = float("nan")                          # not even hashable: still a contract error
+    with pytest.raises(ContractError, match="training rows"):
+        training.predict_model(t, ds, [60])
+
+
+def test_model_id_must_be_a_digest(ds):
+    from dataclasses import replace
+    t = training.fit_model(ds, list(range(50)), RIDGE)
+    for bad in ("xyz", "0" * 15, "G" * 16, None):
+        with pytest.raises(ContractError, match="16 hex characters"):
+            replace(t, model_id=bad)
+
+
+def test_fitted_model_names_must_be_approved():
+    with pytest.raises(ContractError, match="not an approved family"):
+        models.FittedModel("lasso", (0.0,), (1.0,), (0.0,), 0.0)
+
+
+def test_model_code_hash_covers_model_code_only():
+    assert training.MODEL_CODE_FILES == ("canonical.py", "contracts.py", "dataset.py", "models.py", "training.py")
+    assert training.model_code_hash() == training.model_code_hash()

@@ -254,11 +254,13 @@ Registry). Summary:
     never deleted);
   - 689 tests pass; 25 dataset mutations, all caught.
 - PR #11 merged into `main` (`f06945b`).
-- PR #12, ML baseline models (branch `ml-baseline-models`, not pushed; plan and result in `ml-plan.md`):
+- PR #12, ML baseline models (branch `ml-baseline-models`, open, not merged; plan and result in `ml-plan.md`):
   - `ModelSpec`; `mean` (reference only), `ridge` (numpy), `elasticnet` (statsmodels); no new dependency;
   - `fit_model` / `predict_model` on explicit row positions of one verified dataset; labels never read to predict;
   - JSON model artifacts (no pickle) with a recomputed `model_id`; shared atomic publisher `ml/publish.py`;
-  - 754 tests pass; 46 mutations, all caught;
+  - review fixes: a metadata contract checked whenever a trained model is built or used, approved fitted model
+    names, `model_code_hash` scope;
+  - 786 tests pass; 66 mutations, all caught;
   - next: PR #13, the walk-forward runner.
 - Branch `fireant-api-inspector` (Chrome extension that found the trade-tape hub methods,
   `fireant-api-inspector-plan.md` on that branch): local only. The user stopped this work on 2026-11-11, and its fate

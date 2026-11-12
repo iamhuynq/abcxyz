@@ -63,7 +63,10 @@ def test_created_at_is_not_part_of_the_identity(trained, tmp_path):
 
 
 @pytest.mark.parametrize("change, why", [
-    (lambda d: d["metadata"].update(label="fwd_ret_exec_10d"), "model_id"),
+    (lambda d: d["metadata"].update(environment="python 0"), "model_id"),
+    (lambda d: d["metadata"].update(label="fwd_ret_exec_10d"), "label differs"),
+    (lambda d: d["metadata"]["dataset_provenance"].update(kept_rows=10**6), "dataset_fingerprint"),
+    (lambda d: d["metadata"].update(model_code_hash="z" * 16), "model_code_hash"),
     (lambda d: d["metadata"]["training"].update(rows=1), "model_id"),
     (lambda d: d["fitted"]["coef"].__setitem__(0, (1.5).hex()), "model_id"),
     (lambda d: d["fitted"].update(intercept=(0.25).hex()), "model_id"),
@@ -76,10 +79,11 @@ def test_created_at_is_not_part_of_the_identity(trained, tmp_path):
     (lambda d: d.update(extra=1), "exactly the fields"),
     (lambda d: d["fitted"].update(coef=d["fitted"]["coef"][:2]), "inconsistent shapes"),
     (lambda d: d["fitted"].update(means=d["fitted"]["means"][:2], scales=d["fitted"]["scales"][:2],
-                                   coef=d["fitted"]["coef"][:2]), "number of features"),
+                                   coef=d["fitted"]["coef"][:2]), "3 features for 2 coefficients"),
     (lambda d: d["fitted"].update(intercept="nan"), "finite"),
     (lambda d: d["fitted"].update(intercept=0.5), "float.hex"),
-    (lambda d: d["metadata"].pop("features"), "malformed metadata"),
+    (lambda d: d["metadata"].pop("features"), "malformed metadata: keys"),
+    (lambda d: d["fitted"].update(model="lasso"), "not an approved family"),
 ])
 def test_edited_artifacts_are_refused(trained, tmp_path, change, why):
     path = artifacts.save_model(trained, tmp_path / "m")

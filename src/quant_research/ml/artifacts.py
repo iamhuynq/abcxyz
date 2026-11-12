@@ -54,11 +54,9 @@ def load_model(path: Path) -> TrainedModel:
         raise ContractError(f"{path}: malformed spec or metadata")
     spec = ModelSpec(s["model"], s["params"], s["seed"])                # validated again
     fitted = FittedModel.from_json(doc["fitted"])                        # shapes, finite floats
-    trained = TrainedModel(spec, fitted, MappingProxyType(meta), doc["model_id"])
     try:
-        check_trained(trained)                                           # model name, feature count, model_id
-    except (KeyError, TypeError) as e:
-        raise ContractError(f"{path}: malformed metadata ({e})") from None
+        trained = TrainedModel(spec, fitted, MappingProxyType(meta), doc["model_id"])   # structure and metadata
+        check_trained(trained)                                                         # and model_id
     except ContractError as e:
         raise ContractError(f"{path}: {e}") from None
     return trained

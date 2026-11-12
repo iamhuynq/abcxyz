@@ -23,7 +23,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from quant_research.ml.contracts import ContractError, ModelSpec
+from quant_research.ml.contracts import (
+    MODELS,
+    REFERENCE_MODELS,
+    ContractError,
+    ModelSpec,
+)
 
 SOLVER = {"elasticnet": {"maxiter": 1000, "cnvrg_tol": 1e-8}}          # coordinate descent (statsmodels default)
 
@@ -37,6 +42,8 @@ class FittedModel:
     intercept: float
 
     def __post_init__(self) -> None:
+        if self.model not in MODELS + REFERENCE_MODELS:
+            raise ContractError(f"fitted model {self.model!r} is not an approved family")
         k = len(self.coef)
         if k == 0 or not (len(self.means) == len(self.scales) == k):
             raise ContractError(f"fitted state has inconsistent shapes {len(self.means)}, {len(self.scales)}, {k}")

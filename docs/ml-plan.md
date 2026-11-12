@@ -1000,3 +1000,72 @@ Branch `ml-baseline-models` from `f06945b`. Full suite: 754 passed (689 before, 
   - Bit-identical results are guaranteed on this machine and environment only; the environment is recorded in
     every model.
   - No tree model; it needs a dependency review.
+
+## PR #12 review (external, 2026-11-12, head `8ed4341`): assessment and plan
+
+No P1 correctness defect was found. Each point was checked against the code.
+
+1. **`check_trained` does not validate the metadata structure: confirmed.**
+   - A hand-built `TrainedModel` whose metadata is malformed but whose `model_id` is recomputed passes
+     `check_trained`.
+   - With `features` as plain names or an integer `label`, prediction is refused only later, by the
+     feature comparison.
+   - With no `training` summary, prediction passes and the model can be saved, so an artifact without its
+     training interval summary (which PR #13 needs) is possible.
+   - Plan: one `check_metadata(metadata, n_features)`, run in `TrainedModel.__post_init__`, so an invalid
+     trained model cannot exist, and again in `check_trained` (save, predict, load).
+   - Exact keys: `label`, `horizon`, `features`, `dataset_fingerprint`, `dataset_provenance`, `training`,
+     `solver`, `environment`, `model_code_hash`.
+   - `features`: a list of `[name, source_version]` string pairs with unique names, one per coefficient, equal
+     to the provenance's `feature_versions` and to its `columns` layout.
+   - `label` and `horizon` (an int > 0) equal those of the provenance.
+   - `dataset_fingerprint` equals `dataset.fingerprint(provenance, provenance["content_hash"])`, so the copied
+     provenance is bound to the fingerprint.
+   - `training`: exact keys; `rows` an int > 0; `keys_hash` 16 hex characters; ISO dates with
+     `first_date <= last_date`, `first_label_start > first_date` and `last_label_end > last_date`.
+   - `solver` a mapping; `environment` a string; `model_code_hash` 16 hex characters.
+   - Each malformed case gets a test (direct construction and edited artifact); `check_trained` still recomputes
+     `model_id` because the nested metadata stays mutable.
+2. **`FittedModel` does not validate its model name: confirmed.** It will be checked against
+   `MODELS + REFERENCE_MODELS`, with a test.
+3. **Features from `cols[2:-3]`: accepted as is, recorded.** The full layout is checked right after, so a schema
+   change fails closed rather than being misread. An explicit ordered feature list in the dataset metadata would
+   change the dataset builder's metadata and every dataset fingerprint, which PR #12 does not touch. It is a
+   follow-up for the next dataset schema version.
+4. **`code_hash` scope: clarified by renaming.** It is meant to cover the code that determines the fitted numbers
+   and the predictions (canonical, contracts, dataset verification, models, training). `artifacts.py` and
+   `publish.py` only store and move bytes, and the storage format is versioned separately by
+   `artifact_schema_version`; adding them would change `model_id` for storage-only edits. The metadata key
+   becomes `model_code_hash`, with a docstring that states this scope. No artifact exists outside tests, and the
+   schema stays `model/1`.
+5. **Verification cost: follow-up for PR #13**, as already recorded (measure on the walk-forward workload; any
+   verified-dataset handle must not skip verification).
+
+CI: `gh` is not installed here; the user confirms the run on the pushed head.
+
+### PR #12 review fixes: result (2026-11-12)
+
+Full suite: 786 passed (754 before). ML model tests: `test_ml_models.py` 17, `test_ml_training.py` 53,
+`test_ml_artifacts.py` 27.
+
+- **Metadata contract.** `training.check_metadata` runs in `TrainedModel.__post_init__` and again in `check_trained`
+  (save, load, predict), so an invalid trained model cannot be built, even with a recomputed `model_id`.
+  - It checks every rule of the plan: exact keys; feature pairs, label and horizon equal to the provenance;
+    `dataset_fingerprint` reproduced from the copied provenance; a well-formed, ordered training summary
+    (`rows` within `1..kept_rows`); `solver`, `environment` and `model_code_hash`.
+  - `model_id` must be 16 hex characters.
+  - Tests:
+    - 24 malformed-metadata cases are refused at construction;
+    - metadata edited after construction is refused on predict and save, including a value that cannot even be
+      hashed;
+    - edited artifacts are refused (label, provenance, code hash, fitted model name).
+- **`FittedModel`** refuses a model name outside `MODELS + REFERENCE_MODELS`.
+- **`model_code_hash`** (renamed from `code_hash`) with `MODEL_CODE_FILES`: the code that determines fitted numbers
+  and predictions. Storage (`artifacts.py`, `publish.py`) is versioned by `artifact_schema_version`, not by this
+  hash.
+- **Not changed, recorded:**
+  - feature discovery by position, followed by the full layout check, until the next dataset schema version;
+  - the verification cost, which is a PR #13 follow-up.
+- **Mutation check.** 66 mutations, all caught: the 46 earlier ones (re-anchored) and 20 new ones, one per
+  metadata rule plus the structure and model-name checks. Two survived the first run (the structure re-check in
+  `check_trained`, the `model_id` format) and were caught after two tests were added.

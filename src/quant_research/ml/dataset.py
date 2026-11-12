@@ -10,6 +10,7 @@ adj_close(label_end) / adj_open(label_start) - 1 reproduces fwd_ret_exec_{h}d.
 import hashlib
 import json
 import math
+import os
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -18,12 +19,13 @@ from pathlib import Path
 from types import MappingProxyType
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from quant_research.ml import allowlist
 from quant_research.ml.builds import build_identity, build_source_versions, check_build
 from quant_research.ml.canonical import CONTRACT, digest
-from quant_research.ml.contracts import UNIVERSES, ContractError, DatasetSpec
+from quant_research.ml.contracts import RESEARCH_END, UNIVERSES, ContractError, DatasetSpec
 from quant_research.ml.keys import check_point_in_time, check_unique
 
 SCHEMA_VERSION = "dataset/1"
@@ -65,12 +67,13 @@ def _load(con: duckdb.DuckDBPyConnection, spec: DatasetSpec, s: str) -> pd.DataF
     cols, joins, binds = _feature_sql(spec, s)
     universe = UNIVERSES[spec.universe]
     sql = f"""
-        WITH iv AS (SELECT symbol, date, lead(date, 1) OVER w AS label_start, lead(date, {h}) OVER w AS label_end
+        WITH iv AS (SELECT symbol, date, period AS decision_period, lead(date, 1) OVER w AS label_start,
+                           lead(date, {h}) OVER w AS label_end, lead(period, {h}) OVER w AS label_end_period
                     FROM {s}daily_panel WINDOW w AS (PARTITION BY symbol ORDER BY date)),
         c AS (SELECT symbol, date FROM {s}daily_panel WHERE date BETWEEN ? AND ?)
         SELECT c.date, c.symbol, sf.date AS feature_date, coalesce(sf.in_universe, false) AS in_universe,
                iv.label_start, iv.label_end, t.{label} AS label, t.entry_blocked,
-               t.fwd_has_price_jump_{h}d AS price_jump_in_window, t.crosses_period_{h}d AS crosses_period,
+               t.fwd_has_price_jump_{h}d AS price_jump_in_window, iv.decision_period, iv.label_end_period,
                {", ".join(cols)}
         FROM c
         LEFT JOIN iv ON iv.symbol = c.symbol AND iv.date = c.date
@@ -91,7 +94,10 @@ def _status(df: pd.DataFrame, spec: DatasetSpec) -> pd.Series:
               "no_label_interval": df["label_end"].isna(),
               "entry_blocked": df["entry_blocked"].eq(True),
               "price_jump_in_window": df["price_jump_in_window"].eq(True),
-              "label_crosses_period": df["crosses_period"].eq(True),
+              # the label ends in another period than its decision (daily_panel's own period rule), or past the
+              # research cutoff: checked here from the interval, not taken from stock_targets
+              "label_crosses_period": end.notna() & ((df["label_end_period"] != df["decision_period"])
+                                                     | (end > RESEARCH_END)),
               "label_after_dataset_end": end.notna() & (end > spec.period_end),
               "label_null": df["label"].isna(),
               "feature_null": df[features].isna().any(axis=1)}
@@ -103,18 +109,27 @@ def _status(df: pd.DataFrame, spec: DatasetSpec) -> pd.Series:
 
 
 def _cell(v):
-    if v is None or (isinstance(v, float) and math.isnan(v)) or v is pd.NaT:
+    """Canonical value: missing (None, NaN, NaT) as null; bool as bool; integers as int; floats as float.hex with
+    -0.0 as 0.0 and +/-inf kept ('inf', '-inf'); dates as ISO dates; datetimes with a time as full ISO."""
+    if v is None or v is pd.NaT:
         return None
-    if isinstance(v, (pd.Timestamp, datetime)):
-        return v.date().isoformat()
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        f = float(v)
+        if math.isnan(f):
+            return None
+        return (0.0 if f == 0.0 else f).hex()
+    if isinstance(v, (pd.Timestamp, datetime, np.datetime64)):
+        t = pd.Timestamp(v)
+        return t.date().isoformat() if t == t.normalize() and t.tzinfo is None else t.isoformat()
     if isinstance(v, date):
         return v.isoformat()
-    if isinstance(v, float) or hasattr(v, "dtype") and getattr(v.dtype, "kind", "") == "f":
-        return float(v).hex()
-    if hasattr(v, "item"):
-        v = v.item()
-        return float(v).hex() if isinstance(v, float) else v
-    return v
+    if isinstance(v, str):
+        return v
+    raise ContractError(f"value of type {type(v).__name__} has no canonical form")
 
 
 def content_hash(data: pd.DataFrame) -> str:
@@ -127,6 +142,14 @@ def content_hash(data: pd.DataFrame) -> str:
     return h.hexdigest()
 
 
+def fingerprint(provenance: dict, content: str) -> str:
+    """The dataset fingerprint: a canonical SHA-256 over the provenance (metadata without content_hash) and the
+    logical content hash. Used by both build_dataset and read_dataset. This is an integrity check (any change to the
+    data, the content hash, the metadata or the fingerprint is detected), not a digital signature: anyone who can
+    rewrite all of them can recompute it."""
+    return digest({"provenance": {k: v for k, v in provenance.items() if k != "content_hash"}, "content": content})
+
+
 def build_dataset(con: duckdb.DuckDBPyConnection, spec: DatasetSpec, build_id: str,
                   schema: str = "") -> DatasetResult:
     """`con`: a read-only connection to research.duckdb (schema "") or a store with it attached as rs ("rs.")."""
@@ -135,7 +158,8 @@ def build_dataset(con: duckdb.DuckDBPyConnection, spec: DatasetSpec, build_id: s
     versions = build_source_versions(con, build_id, schema)
     df = _load(con, spec, schema)
     check_unique(df)
-    check_point_in_time(df.assign(feature_date=df["feature_date"].fillna(df["date"])))
+    dated = df["feature_date"].notna()               # a candidate without a stock_features row is counted, not dated
+    check_point_in_time(df[dated])
     status = _status(df, spec)
     features = [f.name for f in spec.features]
     data = df.loc[status == "kept", ["date", "symbol", *features, "label", "label_start", "label_end"]]
@@ -154,17 +178,35 @@ def build_dataset(con: duckdb.DuckDBPyConnection, spec: DatasetSpec, build_id: s
             "source_versions": versions, **ident, "period": [spec.period_start, spec.period_end],
             "universe_sql": UNIVERSES[spec.universe], "input_rows": n, "kept_rows": len(data),
             "excluded_rows": excluded, "exclusions": [list(e) for e in exclusions],
-            "limitations": list(allowlist.LIMITATIONS), "content_hash": content_hash(data)}
-    return DatasetResult(data, MappingProxyType(meta), digest(meta), exclusions, n, len(data), excluded)
+            "limitations": list(allowlist.LIMITATIONS), "rows_without_stock_features": int((~dated).sum()),
+            "content_hash": content_hash(data)}
+    if (data["label_end"] > RESEARCH_END).any():      # invariant, also guaranteed by label_crosses_period
+        raise ContractError("a kept label ends after the research cutoff")
+    return DatasetResult(data, MappingProxyType(meta), fingerprint(meta, meta["content_hash"]), exclusions, n,
+                         len(data), excluded)
 
 
 def write_dataset(result: DatasetResult, path: Path) -> Path:
     """data.parquet + metadata.json in one directory, renamed into place in one step. `path` must not exist."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(f".{path.name}.lock")
+    try:                                              # one publisher per path: O_EXCL is atomic across processes
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise FileExistsError(f"{path} is being published by another process") from None
+    os.close(fd)
+    try:
+        return _publish(result, path)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def _publish(result: DatasetResult, path: Path) -> Path:
     if path.exists():
         raise FileExistsError(f"{path} exists: a dataset artifact is never overwritten")
     tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    tmp.mkdir(parents=True)
+    tmp.mkdir()
     try:
         result.data.to_parquet(tmp / "data.parquet", index=False)
         (tmp / "metadata.json").write_text(json.dumps({"fingerprint": result.fingerprint,
@@ -185,8 +227,9 @@ def read_dataset(path: Path) -> tuple[pd.DataFrame, dict]:
     doc = json.loads((path / "metadata.json").read_text())
     data = pd.read_parquet(path / "data.parquet")
     meta = doc["metadata"]
-    if content_hash(data) != meta["content_hash"]:
+    actual = content_hash(data)                       # recomputed from the data, never trusted from the metadata
+    if actual != meta.get("content_hash"):
         raise ContractError(f"{path}: the data does not match its metadata (content hash)")
-    if doc.get("fingerprint") != digest(meta):
+    if doc.get("fingerprint") != fingerprint(meta, actual):
         raise ContractError(f"{path}: the metadata does not match its fingerprint")
     return data, doc

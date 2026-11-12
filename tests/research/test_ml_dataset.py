@@ -88,7 +88,8 @@ def test_masks_are_never_hidden_by_a_null_label_and_first_match_wins(research):
         spec = _spec(20)
         df = dataset._load(con, spec, "")
         status = dataset._status(df, spec)
-    masked = df["entry_blocked"].eq(True) | df["price_jump_in_window"].eq(True) | df["crosses_period"].eq(True)
+    crossing = df["label_end"].notna() & (df["label_end_period"] != df["decision_period"])
+    masked = df["entry_blocked"].eq(True) | df["price_jump_in_window"].eq(True) | crossing
     assert not (masked & df["label"].isna() & df["label_end"].notna()).any()    # masks never null the label
     assert (status[df["label_end"].isna() & df["in_universe"]] == "no_label_interval").all()
     assert set(status) <= {"kept", *dataset.REASONS}
@@ -216,3 +217,157 @@ def test_tampered_metadata_is_refused(research, tmp_path):
     (out / "metadata.json").write_text(json.dumps(doc))
     with pytest.raises(ContractError, match="does not match its fingerprint"):
         dataset.read_dataset(out)
+
+
+# --- PR #11 review fixes -------------------------------------------------------------------------------------------
+
+def _artifact(research, tmp_path, name="ds"):
+    import json
+    with _con(research) as con:
+        r = dataset.build_dataset(con, _spec(), _build_id(con))
+    out = dataset.write_dataset(r, tmp_path / name)
+    return r, out, json.loads((out / "metadata.json").read_text())
+
+
+def test_fingerprint_binds_provenance_and_logical_content(research, tmp_path):
+    import json
+    r, out, doc = _artifact(research, tmp_path)
+    meta = dict(r.metadata)
+    assert r.fingerprint == dataset.fingerprint(meta, dataset.content_hash(r.data)) == doc["fingerprint"]
+    data = pd.read_parquet(out / "data.parquet")
+    changed = data.copy()
+    changed.iloc[0, 2] = changed.iloc[0, 2] + 1.0
+    new_hash = dataset.content_hash(changed)
+    # data and its content_hash rewritten together, fingerprint left: refused, because the fingerprint covers content
+    changed.to_parquet(out / "data.parquet", index=False)
+    (out / "metadata.json").write_text(json.dumps(doc | {"metadata": doc["metadata"] | {"content_hash": new_hash}}))
+    with pytest.raises(ContractError, match="does not match its fingerprint"):
+        dataset.read_dataset(out)
+
+
+@pytest.mark.parametrize("tamper, why", [
+    (lambda d: d | {"metadata": d["metadata"] | {"content_hash": "0" * 64}}, "content hash"),
+    (lambda d: d | {"metadata": d["metadata"] | {"kept_rows": d["metadata"]["kept_rows"] + 1}}, "fingerprint"),
+    (lambda d: d | {"fingerprint": "0" * 16}, "fingerprint"),
+])
+def test_tampered_metadata_or_fingerprint_is_refused(research, tmp_path, tamper, why):
+    import json
+    _r, out, doc = _artifact(research, tmp_path)
+    (out / "metadata.json").write_text(json.dumps(tamper(doc)))
+    with pytest.raises(ContractError, match=why):
+        dataset.read_dataset(out)
+
+
+@pytest.fixture(scope="module")
+def year_end(tmp_path_factory):
+    """A build whose 300 sessions run from 2023-06-01 into 2024: labels cross the research cutoff."""
+    d = tmp_path_factory.mktemp("yearend")
+    build_synthetic_warehouse(d / "w.duckdb", start=date(2023, 6, 1))
+    build(d / "w.duckdb", d / "r.duckdb", NOW)
+    return d / "r.duckdb"
+
+
+def test_label_crossing_the_research_cutoff_is_checked_from_the_interval(year_end):
+    spec = _spec(5, start=date(2023, 6, 1), end=date(2023, 12, 29))
+    with _con(year_end) as con:
+        df = dataset._load(con, spec, "")
+        r = dataset.build_dataset(con, spec, _build_id(con))
+    status = dataset._status(df, spec)
+    end = pd.to_datetime(df["label_end"]).dt.date
+    assert (status[end > date(2023, 12, 31)].isin(["outside_universe", "label_crosses_period"])).all()
+    assert (status[(end > date(2023, 12, 31)) & df["in_universe"]] == "label_crosses_period").all()
+    last = df[end == date(2023, 12, 29)]                                   # ends on the last research session
+    assert len(last) and not (dataset._status(df, spec)[last.index] == "label_crosses_period").any()
+    assert (r.data["label_end"] <= date(2023, 12, 31)).all() and dict(
+        (e[0], e[1]) for e in r.exclusions)["label_crosses_period"] > 0
+    assert (df["decision_period"] == "research").all()
+
+
+def test_missing_feature_rows_are_counted_and_late_features_refused(research, monkeypatch):
+    real = dataset._load
+    with _con(research) as con:
+        bid = _build_id(con)
+
+        def late(*a):
+            df = real(*a)
+            return df.assign(feature_date=df["feature_date"].where(df.index != 3, pd.Timestamp("2099-01-01")))
+        monkeypatch.setattr(dataset, "_load", late)
+        with pytest.raises(ContractError, match="after their decision date"):
+            dataset.build_dataset(con, _spec(), bid)
+
+        def missing(*a):
+            df = real(*a)
+            return df.assign(feature_date=df["feature_date"].where(df.index != 3, None))
+        monkeypatch.setattr(dataset, "_load", missing)
+        r = dataset.build_dataset(con, _spec(), bid)
+    assert r.metadata["rows_without_stock_features"] == 1
+
+
+def test_canonical_cells():
+    import numpy as np
+    c = dataset._cell
+    assert c(np.int64(3)) == c(3) == 3 and c(np.float32(0.5)) == c(0.5) == (0.5).hex()
+    assert c(float("nan")) is None and c(None) is None and c(pd.NaT) is None
+    assert c(float("inf")) == "inf" and c(float("-inf")) == "-inf"
+    assert c(-0.0) == c(0.0) and c(np.bool_(True)) is True and c(False) is False
+    assert c(pd.Timestamp("2023-01-02")) == c(date(2023, 1, 2)) == c(np.datetime64("2023-01-02")) == "2023-01-02"
+    assert c(datetime(2023, 1, 2, 9, 30)) == "2023-01-02T09:30:00"
+    with pytest.raises(ContractError):
+        c(object())
+
+
+def test_concurrent_publishers_never_overwrite(research, tmp_path):
+    import threading
+    with _con(research) as con:
+        r = dataset.build_dataset(con, _spec(), _build_id(con))
+    target, results = tmp_path / "shared", []
+
+    def publish():
+        try:
+            dataset.write_dataset(r, target)
+            results.append("ok")
+        except FileExistsError:
+            results.append("refused")
+    threads = [threading.Thread(target=publish) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["ok", "refused", "refused", "refused"]
+    assert dataset.read_dataset(target)[1]["fingerprint"] == r.fingerprint
+    assert not list(tmp_path.glob(".shared.*"))                            # no lock or temp left
+    (tmp_path / ".other.lock").write_text("")                              # a publisher in progress
+    with pytest.raises(FileExistsError, match="being published"):
+        dataset.write_dataset(r, tmp_path / "other")
+
+
+def test_excluded_candidates_get_intervals_from_the_full_series(research):
+    with _con(research) as con:
+        spec = _spec(5)
+        df = dataset._load(con, spec, "")
+        px = con.execute("SELECT symbol, date FROM daily_panel ORDER BY symbol, date").df()
+    status = dataset._status(df, spec)
+    px["date"] = pd.to_datetime(px["date"]).dt.date
+    own = {s: list(g["date"]) for s, g in px.groupby("symbol")}
+    excluded = df[(status != "kept") & df["label_end"].notna()]
+    assert len(excluded) > 0 and set(status[excluded.index]) >= {"outside_universe"}
+    for r in excluded.itertuples(index=False):
+        d = pd.Timestamp(r.date).date()
+        seq = own[r.symbol]
+        i = seq.index(d)
+        assert (pd.Timestamp(r.label_start).date(), pd.Timestamp(r.label_end).date()) == (seq[i + 1], seq[i + 5])
+
+
+def test_each_crossing_rule_works_on_its_own():
+    """Period change and research cutoff are two independent rules of label_crosses_period."""
+    spec = _spec(5)
+    base = dict(symbol="A", in_universe=True, label_start=date(2023, 12, 20), entry_blocked=False,
+                price_jump_in_window=False, label=0.01, **{f.name: 1.0 for f in spec.features})
+    df = pd.DataFrame([
+        base | dict(date=date(2023, 12, 18), label_end=date(2023, 12, 22), decision_period="research",
+                    label_end_period="validation"),                    # period differs, before the cutoff
+        base | dict(date=date(2023, 12, 19), label_end=date(2024, 1, 2), decision_period="research",
+                    label_end_period="research"),                      # same period label, after the cutoff
+        base | dict(date=date(2023, 12, 20), label_end=date(2023, 12, 22), decision_period="research",
+                    label_end_period="research")])                     # neither: kept
+    assert dataset._status(df, spec).tolist() == ["label_crosses_period", "label_crosses_period", "kept"]

@@ -701,3 +701,51 @@ no runner.
   - intervals computed from traded rows only: a no-trade session was added to the fixture;
   - the fingerprint not checked on read: a tampered-metadata test;
   - the dataset-end rule: a dataset ending mid-series.
+
+### PR #11 review fixes: result (2026-11-12)
+
+Full suite: 687 passed (677 before). Scope unchanged: no model, no runner.
+
+- **P1-1: fingerprint bound to content.**
+  - `dataset.fingerprint(provenance, content)` is a canonical SHA-256 over the metadata (without
+    `content_hash`) and the logical content hash. The same function is used by `build_dataset` and
+    `read_dataset`.
+  - On read, the content hash is recomputed from the data, compared with the metadata, and then used to
+    recompute the fingerprint.
+  - This is an **integrity check, not a digital signature**: it detects any change to the data, the content
+    hash, the metadata or the fingerprint, but whoever can rewrite all of them can recompute it. Authenticity
+    would need a key, which is out of scope.
+  - Tests:
+    - data and `content_hash` rewritten together with a stale fingerprint are refused, which shows the
+      content is in the fingerprint;
+    - a tampered `content_hash`, a changed metadata field and a forged fingerprint are each refused.
+- **P1-2: period crossing from the interval itself.**
+  - The builder takes `decision_period` and `lead(period, h)` (the period of `label_end`) from
+    `daily_panel`'s own period column, over the same full series.
+  - `label_crosses_period` = the two periods differ, or `label_end` > 2023-12-31. `stock_targets`'s
+    `crosses_period` is no longer read.
+  - `label_after_dataset_end` stays separate.
+  - A kept label ending after the cutoff raises (an invariant).
+  - Tests:
+    - a build running from 2023-06 into 2024: every in-universe row whose label ends in 2024 is
+      `label_crosses_period`, a label ending on 2023-12-29 is not, and no kept label ends after the cutoff;
+    - a hand-made frame checks each rule (period change, cutoff) on its own.
+- **Point in time.** Missing feature dates are no longer filled with the decision date. Dated rows are checked
+  (a late feature raises); rows without a `stock_features` row are counted in
+  `metadata.rows_without_stock_features`.
+- **`_cell`.**
+  - NumPy integers become `int`; floats become `float.hex`, with -0.0 as 0.0 and +/-inf as `inf` / `-inf`.
+  - NaN, None and NaT are null; NumPy and Python booleans become `bool`.
+  - A midnight Timestamp, a `date` or a `datetime64` gives an ISO date; a datetime with a time gives full ISO.
+  - Any other type raises.
+- **Concurrent publishers.**
+  - `write_dataset` takes an `O_EXCL` lock file per path, which is atomic across processes and threads.
+  - It refuses while another publisher holds the lock and refuses an existing destination; the lock and the
+    temporary directory are removed in every case.
+  - Test: 4 threads publish to one path; exactly 1 succeeds, the 3 others are refused, and the artifact verifies.
+- **Excluded candidates.** Test: for every excluded row with an interval (outside the universe included),
+  `label_start` and `label_end` equal the symbol's own next and h-th `daily_panel` sessions.
+- **Mutation check.** 20 mutations, all caught (13 earlier, re-anchored, and 7 new).
+  - One first survived: the period comparison, because for a research-only dataset every crossing is also past
+    the cutoff and the two rules masked each other. The hand-made test now checks each rule on its own, and
+    removing either rule is caught.
